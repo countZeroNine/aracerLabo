@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>aRacer Lab — Fuel Map Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  :root {
+    --bg-deep:      #08090b;
+    --bg-panel:     #0f1115;
+    --bg-cell:      #15171c;
+    --border:       #232730;
+    --border-bright:#3a4150;
+    --accent:       #fb923c;
+    --accent-bright:#fed7aa;
+    --cool:         #38bdf8;
+    --target:       #84cc16;
+    --warn:         #fbbf24;
+    --danger:       #ef4444;
+    --text:         #fafaf9;
+    --text-dim:     #a1a1aa;
+    --text-muted:   #52525b;
+  }
+  html, body, #root { background: var(--bg-deep); color: var(--text); margin: 0; padding: 0; min-height: 100vh; }
+  body { font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+  .font-mono, code, kbd, pre { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: var(--bg-deep); }
+  ::-webkit-scrollbar-thumb { background: var(--border); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
+
+  /* Subtle scanline texture for ECU-cell aesthetic */
+  .scanlines::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(0deg,
+      rgba(255,255,255,0.012) 0px,
+      rgba(255,255,255,0.012) 1px,
+      transparent 1px, transparent 3px);
+    pointer-events: none;
+  }
+  /* Tabular numbers for technical readouts */
+  .tnum { font-variant-numeric: tabular-nums; }
+  /* Heatmap cell hover */
+  .cell-hot { stroke: var(--accent-bright) !important; stroke-width: 2 !important; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useRef, useCallback, useEffect } = React;
+
+// ─── Aesthetic constants ─────────────────────────────────────
+const COLORS = {
+  bg: "var(--bg-deep)",
+  panel: "var(--bg-panel)",
+  cell: "var(--bg-cell)",
+  border: "var(--border)",
+  borderBright: "var(--border-bright)",
+  accent: "var(--accent)",
+  accentBright: "var(--accent-bright)",
+  cool: "var(--cool)",
+  target: "var(--target)",
+  warn: "var(--warn)",
+  danger: "var(--danger)",
+  text: "var(--text)",
+  textDim: "var(--text-dim)",
+  textMuted: "var(--text-muted)",
+};
+
+// AFR target bands per engine type
+const AFR_TARGETS = {
+  "2st": { low: 11.5, mid: 12.0, high: 12.5 },
+  "4st": { low: 12.5, mid: 13.0, high: 13.5 },
+};
+const AFR_DISPLAY_MIN = 8.0;
+const AFR_DISPLAY_MAX = 18.0;
+
+// 8-stop HSL gradient for AFR colormap, calibrated to engine target band
+// blue (very lean) → teal → green (target low) → lime (target mid) → yellow-green → yellow (stoich) → orange (rich) → red (very rich)
+const afrColor = (afr, engineType) => {
+  if (afr <= 0 || isNaN(afr)) return null;
+  const t = AFR_TARGETS[engineType] || AFR_TARGETS["4st"];
+  const stops = [
+    { afr: AFR_DISPLAY_MIN, color: [220, 80, 50] },   // deep blue
+    { afr: 11.0,            color: [200, 70, 50] },   // blue
+    { afr: t.low,           color: [170, 65, 45] },   // teal
+    { afr: t.mid,           color: [110, 70, 45] },   // green / target
+    { afr: t.high,          color: [80,  70, 50] },   // yellow-green
+    { afr: 14.7,            color: [50,  85, 55] },   // yellow / stoich
+    { afr: 16.5,            color: [25,  85, 55] },   // orange
+    { afr: AFR_DISPLAY_MAX, color: [0,   80, 50] },   // deep red
+  ];
+  for (let i = 1; i < stops.length; i++) {
+    if (afr <= stops[i].afr) {
+      const a = stops[i-1], b = stops[i];
+      const f = (afr - a.afr) / (b.afr - a.afr || 1);
+      const h = a.color[0] + (b.color[0] - a.color[0]) * f;
+      const s = a.color[1] + (b.color[1] - a.color[1]) * f;
+      const l = a.color[2] + (b.color[2] - a.color[2]) * f;
+      return `hsl(${h}, ${s}%, ${l}%)`;
+    }
+  }
+  return `hsl(0, 80%, 50%)`;
+};
+
+// ─── aRacer .loga parser (copied from drogger_analyzer) ──────
+const detectLogFormat = (text) => {
+  const firstLine = text.split("\n", 1)[0].trim();
+  if (firstLine.startsWith("<aRacer APP Log Data for RaceAMP>"))     return "aracer_sp";
+  if (firstLine.startsWith("<Cycling Memory Log Data of Super ECU>")) return "aracer_ecu";
+  if (firstLine.startsWith("<ECU Memory Log Data of Super ECU>"))     return "aracer_ecu";
+  if (firstLine.startsWith("<aRacer ECU_Memory Log Data for RaceAMP>")) return "aracer_lm";
+  return "unknown";
+};
+
+const parseAracerLog = (text, format) => {
+  const lines = text.split(/\r?\n/);
+  if (lines.length < 8) throw new Error("aRacer ログのデータ行が不足しています");
+
+  const headers = lines[5].split(",");
+  const normalizeHeader = (h) => {
+    const beforeSlash = h.split("/")[0];
+    const afterDot = beforeSlash.split(".").pop();
+    return afterDot.trim().toLowerCase();
+  };
+  const normalizedHeaders = headers.map(normalizeHeader);
+  const findIdx = (...patterns) => {
+    for (const p of patterns) {
+      const idx = normalizedHeaders.indexOf(p.toLowerCase());
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+
+  const idx = {
+    Rpm:          findIdx("rpm"),
+    Speed:        findIdx("vehicle_speed_filtered", "vehicle_speed", "gps_speed"),
+    Afr:          findIdx("afr_wbo2_cal", "afr"),
+    AfrAlt:       findIdx("af1_afr"),
+    NbO2Volt:     findIdx("nbo2_volt"),
+    Tps:          findIdx("tps_percent"),
+    Volt:         findIdx("volt_batt_indx"),
+    AirTemp:      findIdx("t_air_indx"),
+    Lap:          findIdx("ir_lapnumber"),
+    LapTime:      findIdx("ir_laptime"),
+    Gear:         findIdx("gearnum"),
+    LeanAngle:    findIdx("tc_lean_angle"),
+    MapNum:       findIdx("mapnum"),
+    Wbo2AtEn:     findIdx("wbo2_at_en"),
+    Wbo2Ready:    findIdx("wbo2_ready"),
+    PowerEn:      findIdx("power_en"),
+    RpmLimit:     findIdx("rpm_limit"),
+  };
+
+  // Auto-downsample if source rate >12Hz to keep memory & rendering reasonable
+  const probeRows = Math.min(100, lines.length - 7);
+  let sampleStride = 1;
+  if (probeRows > 10) {
+    const t0 = parseFloat(lines[6].split(",")[0]);
+    const tEnd = parseFloat(lines[6 + probeRows - 1].split(",")[0]);
+    if (!isNaN(t0) && !isNaN(tEnd) && tEnd > t0) {
+      const hz = (probeRows - 1) / ((tEnd - t0) / 1000);
+      if (hz > 12) sampleStride = Math.max(1, Math.round(hz / 10));
+    }
+  }
+
+  const data = [];
+  for (let li = 6; li < lines.length; li += sampleStride) {
+    const line = lines[li];
+    if (!line || !line.length) continue;
+    const parts = line.split(",");
+    const tMs = parseFloat(parts[0]);
+    if (isNaN(tMs)) continue;
+
+    const num = (i) => i >= 0 && i < parts.length ? (parseFloat(parts[i]) || 0) : 0;
+    const intNum = (i) => i >= 0 && i < parts.length ? (parseInt(parts[i], 10) || 0) : 0;
+
+    data.push({
+      RunTime:     tMs / 1000,
+      Rpm:         num(idx.Rpm),
+      Speed:       num(idx.Speed),
+      Afr:         num(idx.Afr),
+      AfrAlt:      num(idx.AfrAlt),
+      NbO2Volt:    num(idx.NbO2Volt),
+      Tps:         num(idx.Tps),
+      Volt:        num(idx.Volt),
+      AirTemp:     num(idx.AirTemp),
+      Gear:        intNum(idx.Gear),
+      LeanAngle:   num(idx.LeanAngle),
+      Lap:         intNum(idx.Lap),
+      MapNum:      intNum(idx.MapNum),
+      Wbo2AtEn:    intNum(idx.Wbo2AtEn),
+      Wbo2Ready:   intNum(idx.Wbo2Ready),
+      PowerEn:     intNum(idx.PowerEn),
+      RpmLimit:    intNum(idx.RpmLimit),
+    });
+  }
+
+  return { data, format, sampleStride, totalRows: lines.length - 6 };
+};
+
+// ─── Fuel map cell binning ───────────────────────────────────
+// Bins (RPM, TPS) samples into a 2D grid, computes per-cell AFR statistics.
+// Default grid: 16 RPM bins × 16 TPS bins, matching typical aRacer fuel maps.
+const computeFuelMapCells = (samples, rpmBins, tpsBins, rpmRange, tpsRange) => {
+  const cells = [];
+  for (let t = 0; t < tpsBins; t++) {
+    const row = [];
+    for (let r = 0; r < rpmBins; r++) row.push({ afrs: [], count: 0 });
+    cells.push(row);
+  }
+  const rpmStep = (rpmRange[1] - rpmRange[0]) / rpmBins;
+  const tpsStep = (tpsRange[1] - tpsRange[0]) / tpsBins;
+
+  for (const s of samples) {
+    if (!s.Afr || s.Afr <= 5 || s.Afr > 25) continue;          // invalid AFR
+    if (!s.Rpm || s.Rpm < rpmRange[0] || s.Rpm > rpmRange[1]) continue;
+    if (s.Tps < tpsRange[0] || s.Tps > tpsRange[1]) continue;
+    const ri = Math.min(rpmBins - 1, Math.floor((s.Rpm - rpmRange[0]) / rpmStep));
+    const ti = Math.min(tpsBins - 1, Math.floor((s.Tps - tpsRange[0]) / tpsStep));
+    cells[ti][ri].afrs.push(s.Afr);
+    cells[ti][ri].count++;
+  }
+
+  // Per-cell statistics
+  for (const row of cells) {
+    for (const cell of row) {
+      if (cell.count === 0) continue;
+      cell.afrs.sort((a, b) => a - b);
+      cell.medianAfr = cell.afrs[Math.floor(cell.afrs.length / 2)];
+      cell.minAfr = cell.afrs[0];
+      cell.maxAfr = cell.afrs[cell.afrs.length - 1];
+      const sum = cell.afrs.reduce((a, b) => a + b, 0);
+      cell.meanAfr = sum / cell.afrs.length;
+    }
+  }
+  return cells;
+};
+
+// ─── Stats summary across all cells ──────────────────────────
+const computeMapStats = (cells, engineType) => {
+  const target = AFR_TARGETS[engineType];
+  let total = 0, withData = 0, inTarget = 0, tooRich = 0, tooLean = 0;
+  let maxCount = 0, busyCell = null;
+  for (let ti = 0; ti < cells.length; ti++) {
+    for (let ri = 0; ri < cells[ti].length; ri++) {
+      const cell = cells[ti][ri];
+      total++;
+      if (cell.count === 0) continue;
+      withData++;
+      if (cell.medianAfr >= target.low && cell.medianAfr <= target.high) inTarget++;
+      else if (cell.medianAfr < target.low) tooRich++;
+      else if (cell.medianAfr > target.high) tooLean++;
+      if (cell.count > maxCount) {
+        maxCount = cell.count;
+        busyCell = { ri, ti, count: cell.count, afr: cell.medianAfr };
+      }
+    }
+  }
+  return { total, withData, inTarget, tooRich, tooLean, maxCount, busyCell };
+};
+
+// ─── Helpers ─────────────────────────────────────────────────
+const fmtNum = (n, d = 1) => n == null || isNaN(n) ? "—" : n.toFixed(d);
+const fmtTime = (s) => {
+  if (!s || s < 0) return "—";
+  const m = Math.floor(s / 60), sec = (s % 60).toFixed(1).padStart(4, "0");
+  return `${m}:${sec}`;
+};
+
+// File reader with FileReader fallback for older browsers
+const readFileAsText = (file) => new Promise((resolve, reject) => {
+  if (typeof file.text === "function") {
+    file.text().then(resolve).catch(reject);
+  } else {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("ファイル読み込みエラー"));
+    reader.readAsText(file);
+  }
+});
+
+// ─── UI primitives ───────────────────────────────────────────
+const Panel = ({ title, accent, children, className = "", actions = null }) => (
+  <div className={`relative ${className}`} style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}` }}>
+    {title && (
+      <div className="px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${COLORS.border}` }}>
+        <div className="flex items-center gap-2">
+          {accent && <div style={{ width: 3, height: 14, background: COLORS.accent }} />}
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em]" style={{ color: COLORS.textDim }}>{title}</div>
+        </div>
+        {actions}
+      </div>
+    )}
+    {children}
+  </div>
+);
+
+const Stat = ({ label, value, unit, color }) => (
+  <div className="flex flex-col gap-0.5">
+    <div className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>{label}</div>
+    <div className="flex items-baseline gap-1">
+      <div className="font-mono text-xl tnum" style={{ color: color || COLORS.text }}>{value}</div>
+      {unit && <div className="font-mono text-[10px]" style={{ color: COLORS.textMuted }}>{unit}</div>}
+    </div>
+  </div>
+);
+
+// ─── Fuel map heatmap (the centerpiece) ──────────────────────
+const FuelMapHeatmap = ({ cells, engineType, rpmRange, tpsRange, hoveredCell, setHoveredCell }) => {
+  const tpsBins = cells.length;
+  const rpmBins = cells[0]?.length || 0;
+  if (!rpmBins) return null;
+
+  const cellW = 50, cellH = 32;
+  const padL = 60, padT = 14, padR = 14, padB = 36;
+  const w = padL + rpmBins * cellW + padR;
+  const h = padT + tpsBins * cellH + padB;
+
+  const target = AFR_TARGETS[engineType];
+
+  // Cell renderer
+  const cellEl = (cell, ri, ti) => {
+    // TPS axis flipped so 100% (high TPS) is at the top
+    const x = padL + ri * cellW;
+    const y = padT + (tpsBins - 1 - ti) * cellH;
+    const isHover = hoveredCell && hoveredCell.ri === ri && hoveredCell.ti === ti;
+    const fill = cell.count > 0 ? afrColor(cell.medianAfr, engineType) : COLORS.cell;
+
+    return (
+      <g key={`${ri}-${ti}`}
+         onMouseEnter={() => setHoveredCell({ cell, ri, ti })}>
+        <rect x={x} y={y} width={cellW} height={cellH}
+              fill={fill} stroke={isHover ? "var(--accent-bright)" : "#0a0a0d"}
+              strokeWidth={isHover ? 2 : 0.5}
+              className={isHover ? "cell-hot" : ""} />
+        {cell.count > 0 && (
+          <>
+            <text x={x + cellW / 2} y={y + cellH / 2 - 1}
+                  textAnchor="middle" dominantBaseline="central"
+                  fontSize={11} fontFamily="JetBrains Mono" fontWeight={600}
+                  fill={cell.medianAfr < 12 ? "#fff" : cell.medianAfr > 14.5 ? "#000" : "rgba(0,0,0,0.85)"}>
+              {cell.medianAfr.toFixed(1)}
+            </text>
+            <text x={x + cellW / 2} y={y + cellH / 2 + 9}
+                  textAnchor="middle"
+                  fontSize={7} fontFamily="JetBrains Mono"
+                  fill={cell.medianAfr < 12 ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.55)"}>
+              n={cell.count}
+            </text>
+          </>
+        )}
+      </g>
+    );
+  };
+
+  // Axis labels
+  const tpsLabels = [];
+  for (let i = 0; i <= tpsBins; i++) {
+    const tps = tpsRange[1] - i * (tpsRange[1] - tpsRange[0]) / tpsBins;
+    tpsLabels.push(
+      <text key={`ty${i}`} x={padL - 6} y={padT + i * cellH}
+            textAnchor="end" dominantBaseline="middle"
+            fontSize={9} fontFamily="JetBrains Mono" fill={COLORS.textDim}>
+        {tps.toFixed(0)}%
+      </text>
+    );
+  }
+  const rpmLabels = [];
+  for (let i = 0; i <= rpmBins; i++) {
+    const rpm = rpmRange[0] + i * (rpmRange[1] - rpmRange[0]) / rpmBins;
+    rpmLabels.push(
+      <text key={`rx${i}`} x={padL + i * cellW} y={padT + tpsBins * cellH + 14}
+            textAnchor="middle"
+            fontSize={9} fontFamily="JetBrains Mono" fill={COLORS.textDim}>
+        {rpm >= 1000 ? (rpm / 1000).toFixed(rpm % 1000 === 0 ? 0 : 1) + "k" : rpm.toFixed(0)}
+      </text>
+    );
+  }
+
+  return (
+    <div className="p-3" onMouseLeave={() => setHoveredCell(null)}>
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxHeight: 600 }}>
+        {/* Axis title: TPS */}
+        <text x={14} y={padT + tpsBins * cellH / 2}
+              textAnchor="middle"
+              transform={`rotate(-90, 14, ${padT + tpsBins * cellH / 2})`}
+              fontSize={10} fontFamily="JetBrains Mono"
+              fill={COLORS.textMuted} letterSpacing="0.18em">
+          THROTTLE %
+        </text>
+        {/* Axis title: RPM */}
+        <text x={padL + rpmBins * cellW / 2} y={h - 4}
+              textAnchor="middle"
+              fontSize={10} fontFamily="JetBrains Mono"
+              fill={COLORS.textMuted} letterSpacing="0.18em">
+          RPM
+        </text>
+        {tpsLabels}
+        {rpmLabels}
+        {cells.flatMap((row, ti) => row.map((cell, ri) => cellEl(cell, ri, ti)))}
+      </svg>
+    </div>
+  );
+};
+
+// ─── AFR colour legend with target band overlay ──────────────
+const AfrLegend = ({ engineType }) => {
+  const target = AFR_TARGETS[engineType];
+  const w = 320, h = 50;
+  const stops = 60;
+  const steps = [];
+  for (let i = 0; i < stops; i++) {
+    const t = i / (stops - 1);
+    const afr = AFR_DISPLAY_MIN + t * (AFR_DISPLAY_MAX - AFR_DISPLAY_MIN);
+    steps.push({ x: (i * w) / stops, color: afrColor(afr, engineType) });
+  }
+  const targetX = (afr) => ((afr - AFR_DISPLAY_MIN) / (AFR_DISPLAY_MAX - AFR_DISPLAY_MIN)) * w;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxWidth: 360 }}>
+      {steps.map((s, i) => (
+        <rect key={i} x={s.x} y={6} width={w / stops + 0.5} height={14} fill={s.color} />
+      ))}
+      {/* Target band overlay */}
+      <rect x={targetX(target.low)} y={3} width={targetX(target.high) - targetX(target.low)} height={20}
+            fill="none" stroke={COLORS.accentBright} strokeWidth={1.2} />
+      <line x1={targetX(target.mid)} y1={3} x2={targetX(target.mid)} y2={23}
+            stroke={COLORS.accentBright} strokeWidth={1} />
+      {/* Tick labels */}
+      {[8, 10, 12, 13, 14.7, 17, 18].map((afr) => (
+        <g key={afr}>
+          <line x1={targetX(afr)} y1={20} x2={targetX(afr)} y2={26} stroke={COLORS.textMuted} strokeWidth={0.5} />
+          <text x={targetX(afr)} y={36} textAnchor="middle" fontSize={9} fontFamily="JetBrains Mono" fill={COLORS.textDim}>
+            {afr}
+          </text>
+        </g>
+      ))}
+      <text x={targetX(target.mid)} y={48} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono"
+            fill={COLORS.accent} letterSpacing="0.15em">
+        TARGET {engineType.toUpperCase()}
+      </text>
+    </svg>
+  );
+};
+
+// ─── Cell detail readout ─────────────────────────────────────
+const CellDetail = ({ hovered, rpmRange, tpsRange, rpmBins, tpsBins, engineType }) => {
+  if (!hovered) {
+    return (
+      <div className="p-3 font-mono text-[10px]" style={{ color: COLORS.textMuted }}>
+        セルにマウスを乗せると詳細が表示されます
+      </div>
+    );
+  }
+  const { cell, ri, ti } = hovered;
+  const rpmLo = rpmRange[0] + ri * (rpmRange[1] - rpmRange[0]) / rpmBins;
+  const rpmHi = rpmRange[0] + (ri + 1) * (rpmRange[1] - rpmRange[0]) / rpmBins;
+  const tpsLo = tpsRange[0] + ti * (tpsRange[1] - tpsRange[0]) / tpsBins;
+  const tpsHi = tpsRange[0] + (ti + 1) * (tpsRange[1] - tpsRange[0]) / tpsBins;
+  const target = AFR_TARGETS[engineType];
+
+  let band = "—", bandColor = COLORS.textMuted;
+  if (cell.count > 0) {
+    if (cell.medianAfr < target.low) { band = "RICH"; bandColor = COLORS.danger; }
+    else if (cell.medianAfr > target.high) { band = "LEAN"; bandColor = COLORS.cool; }
+    else { band = "TARGET"; bandColor = COLORS.target; }
+  }
+
+  return (
+    <div className="p-3 grid grid-cols-2 gap-x-4 gap-y-2">
+      <div>
+        <div className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>RPM Cell</div>
+        <div className="font-mono text-sm tnum">{rpmLo.toFixed(0)} - {rpmHi.toFixed(0)}</div>
+      </div>
+      <div>
+        <div className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>TPS Cell</div>
+        <div className="font-mono text-sm tnum">{tpsLo.toFixed(0)} - {tpsHi.toFixed(0)} %</div>
+      </div>
+      {cell.count > 0 ? (
+        <>
+          <div>
+            <div className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>AFR median</div>
+            <div className="font-mono text-2xl tnum" style={{ color: bandColor }}>{cell.medianAfr.toFixed(2)}</div>
+          </div>
+          <div>
+            <div className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>Status</div>
+            <div className="font-mono text-sm" style={{ color: bandColor }}>{band}</div>
+          </div>
+          <div>
+            <div className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>Range</div>
+            <div className="font-mono text-xs tnum">{cell.minAfr.toFixed(2)} ~ {cell.maxAfr.toFixed(2)}</div>
+          </div>
+          <div>
+            <div className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>Samples</div>
+            <div className="font-mono text-sm tnum">{cell.count}</div>
+          </div>
+        </>
+      ) : (
+        <div className="col-span-2">
+          <div className="font-mono text-[10px]" style={{ color: COLORS.textMuted }}>このセルにはデータが乗っていません（実走で通っていない RPM × TPS の組み合わせ）</div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Stats panel ─────────────────────────────────────────────
+const StatsPanel = ({ stats, rpmBins, tpsBins, rpmRange, tpsRange }) => {
+  const coverage = stats.total > 0 ? (stats.withData / stats.total * 100) : 0;
+  const inTargetPct = stats.withData > 0 ? (stats.inTarget / stats.withData * 100) : 0;
+
+  return (
+    <div className="p-3 grid grid-cols-2 gap-x-4 gap-y-3">
+      <Stat label="Cells covered" value={`${stats.withData}/${stats.total}`} unit={`(${coverage.toFixed(0)}%)`} />
+      <Stat label="In target" value={`${stats.inTarget}/${stats.withData}`} unit={`(${inTargetPct.toFixed(0)}%)`} color={COLORS.target} />
+      <Stat label="Too rich" value={stats.tooRich} color={COLORS.danger} />
+      <Stat label="Too lean" value={stats.tooLean} color={COLORS.cool} />
+      {stats.busyCell && (
+        <div className="col-span-2 mt-1 pt-2" style={{ borderTop: `1px dashed ${COLORS.border}` }}>
+          <div className="font-mono text-[9px] uppercase tracking-[0.2em] mb-0.5" style={{ color: COLORS.textMuted }}>Busiest cell</div>
+          <div className="font-mono text-xs tnum">
+            {(rpmRange[0] + stats.busyCell.ri * (rpmRange[1] - rpmRange[0]) / rpmBins).toFixed(0)} RPM ·{" "}
+            {(tpsRange[0] + stats.busyCell.ti * (tpsRange[1] - tpsRange[0]) / tpsBins).toFixed(0)}%{" "}
+            <span style={{ color: COLORS.textMuted }}>·</span>{" "}
+            <span style={{ color: COLORS.accent }}>AFR {stats.busyCell.afr.toFixed(2)}</span>{" "}
+            <span style={{ color: COLORS.textMuted }}>(n={stats.busyCell.count})</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Settings panel (grid resolution / ranges) ───────────────
+const SettingsPanel = ({ rpmBins, setRpmBins, tpsBins, setTpsBins, rpmRange, setRpmRange, tpsRange, setTpsRange, autoRange, setAutoRange }) => {
+  const NumInput = ({ label, value, onChange, min = 0, max = 99999, step = 1 }) => (
+    <div className="flex flex-col gap-1">
+      <label className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>{label}</label>
+      <input type="number" value={value} min={min} max={max} step={step}
+             onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+             className="font-mono text-sm tnum px-2 py-1 outline-none w-full"
+             style={{ background: COLORS.cell, border: `1px solid ${COLORS.border}`, color: COLORS.text, fontSize: 13 }} />
+    </div>
+  );
+
+  return (
+    <div className="p-3 grid grid-cols-2 gap-x-3 gap-y-2.5">
+      <NumInput label="RPM bins" value={rpmBins} onChange={setRpmBins} min={4} max={32} />
+      <NumInput label="TPS bins" value={tpsBins} onChange={setTpsBins} min={4} max={20} />
+      <NumInput label="RPM min" value={rpmRange[0]} onChange={(v) => setRpmRange([v, rpmRange[1]])} min={0} max={20000} step={500} />
+      <NumInput label="RPM max" value={rpmRange[1]} onChange={(v) => setRpmRange([rpmRange[0], v])} min={0} max={20000} step={500} />
+      <NumInput label="TPS min %" value={tpsRange[0]} onChange={(v) => setTpsRange([v, tpsRange[1]])} min={0} max={100} step={5} />
+      <NumInput label="TPS max %" value={tpsRange[1]} onChange={(v) => setTpsRange([tpsRange[0], v])} min={0} max={100} step={5} />
+      <label className="col-span-2 flex items-center gap-2 mt-1 cursor-pointer">
+        <input type="checkbox" checked={autoRange} onChange={(e) => setAutoRange(e.target.checked)} className="cursor-pointer" />
+        <span className="font-mono text-[10px]" style={{ color: COLORS.textDim }}>RPM 範囲をデータから自動設定</span>
+      </label>
+    </div>
+  );
+};
+
+// ─── Lap filter (chooses which laps go into the map) ──────────
+const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
+  // Group samples by Lap, compute lap durations
+  const laps = useMemo(() => {
+    const m = new Map();
+    for (const s of samples) {
+      if (!m.has(s.Lap)) m.set(s.Lap, { lap: s.Lap, n: 0, t0: s.RunTime, t1: s.RunTime });
+      const e = m.get(s.Lap);
+      e.n++;
+      e.t1 = s.RunTime;
+    }
+    return [...m.values()].sort((a, b) => a.lap - b.lap);
+  }, [samples]);
+
+  if (laps.length <= 1) return null;
+
+  return (
+    <div className="p-3">
+      <div className="flex flex-wrap gap-1.5">
+        <button onClick={() => setLapFilter(new Set())}
+                className={`font-mono text-[10px] uppercase tracking-wider px-2 py-1 transition`}
+                style={{
+                  background: lapFilter.size === 0 ? COLORS.accent : "transparent",
+                  color: lapFilter.size === 0 ? "#000" : COLORS.textDim,
+                  border: `1px solid ${lapFilter.size === 0 ? COLORS.accent : COLORS.border}`,
+                }}>
+          ALL
+        </button>
+        {laps.map((l) => {
+          const dur = l.t1 - l.t0;
+          const active = lapFilter.has(l.lap);
+          return (
+            <button key={l.lap}
+                    onClick={() => {
+                      const next = new Set(lapFilter);
+                      if (next.has(l.lap)) next.delete(l.lap); else next.add(l.lap);
+                      setLapFilter(next);
+                    }}
+                    className="font-mono text-[10px] uppercase tracking-wider px-2 py-1 transition"
+                    style={{
+                      background: active ? COLORS.accent : "transparent",
+                      color: active ? "#000" : COLORS.textDim,
+                      border: `1px solid ${active ? COLORS.accent : COLORS.border}`,
+                    }}>
+            L{l.lap} · {fmtTime(dur)}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ─── About modal ─────────────────────────────────────────────
+const AboutModal = ({ onClose }) => (
+  <div className="fixed inset-0 flex items-center justify-center p-4 z-50" style={{ background: "rgba(0,0,0,0.85)" }} onClick={onClose}>
+    <div onClick={(e) => e.stopPropagation()} className="max-w-xl w-full p-5" style={{ background: COLORS.panel, border: `1px solid ${COLORS.borderBright}` }}>
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.3em]" style={{ color: COLORS.accent }}>aRacer Lab v0.1</div>
+          <div className="font-mono text-lg mt-0.5">Fuel Map Studio</div>
+        </div>
+        <button onClick={onClose} className="font-mono text-sm hover:text-white" style={{ color: COLORS.textDim }}>× CLOSE</button>
+      </div>
+      <div className="text-sm space-y-3 mt-4" style={{ color: COLORS.textDim }}>
+        <p>aRacer Super2 / Mini5 / Logger Module の <code className="font-mono text-xs" style={{ color: COLORS.accent }}>.loga</code> ログを読み込んで、燃調マップ（RPM × TPS × AFR）を可視化するツールです。</p>
+        <p>各セルの色は <strong style={{ color: COLORS.text }}>実走時の AFR 中央値</strong>、数字は AFR とサンプル数。緑系セルは目標帯域内、青寄りはリーン、赤寄りはリッチ。</p>
+        <p style={{ color: COLORS.textMuted }} className="text-xs pt-2" >
+          データはブラウザ内で処理され、外部サーバーには送信されません。<br/>
+          aRacer は Aracer Mechatronic Inc. の製品名です。本ツールは非公式な解析ツールです。
+        </p>
+      </div>
+    </div>
+  </div>
+);
+
+// ─── Main app ────────────────────────────────────────────────
+const App = () => {
+  const [session, setSession] = useState(null);
+  const [parseError, setParseError] = useState(null);
+  const [engineType, setEngineType] = useState("4st");
+  const [rpmBins, setRpmBins] = useState(16);
+  const [tpsBins, setTpsBins] = useState(16);
+  const [rpmRange, setRpmRange] = useState([1000, 14000]);
+  const [tpsRange, setTpsRange] = useState([0, 100]);
+  const [autoRange, setAutoRange] = useState(true);
+  const [lapFilter, setLapFilter] = useState(new Set());
+  const [hoveredCell, setHoveredCell] = useState(null);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const fileInputRef = useRef(null);
+
+  // Auto-adjust RPM range when a new file is loaded
+  useEffect(() => {
+    if (!session || !autoRange) return;
+    const rpms = session.data.map(d => d.Rpm).filter(r => r > 200);
+    if (!rpms.length) return;
+    const maxRpm = Math.max(...rpms);
+    const ceiling = Math.ceil((maxRpm + 500) / 1000) * 1000;
+    setRpmRange([1000, Math.max(8000, Math.min(20000, ceiling))]);
+  }, [session, autoRange]);
+
+  const handleFile = useCallback(async (file) => {
+    setParseError(null);
+    try {
+      const text = await readFileAsText(file);
+      const fmt = detectLogFormat(text);
+      if (fmt !== "aracer_sp" && fmt !== "aracer_ecu" && fmt !== "aracer_lm") {
+        setParseError(`${file.name}: aRacer .loga 形式ではありません`);
+        return;
+      }
+      const { data, format, sampleStride, totalRows } = parseAracerLog(text, fmt);
+      if (!data.length) {
+        setParseError(`${file.name}: データ行が空です`);
+        return;
+      }
+      // Detect data quality
+      const validAfr = data.filter(d => d.Afr > 5 && d.Afr < 25).length;
+      const validRpm = data.filter(d => d.Rpm > 200).length;
+      const validTps = data.filter(d => d.Tps >= 0).length;
+
+      if (validAfr === 0) {
+        setParseError(`${file.name}: 有効な AFR データがありません（センサー未接続？）`);
+        return;
+      }
+
+      setSession({
+        name: file.name.replace(/\.loga$/i, ""),
+        format,
+        data,
+        sampleStride,
+        totalRows,
+        stats: {
+          validAfr, validRpm, validTps,
+          duration: data[data.length - 1].RunTime - data[0].RunTime,
+        },
+      });
+      setLapFilter(new Set());
+      setHoveredCell(null);
+    } catch (e) {
+      setParseError(`${file.name}: ${e.message}`);
+    }
+  }, []);
+
+  // Filter samples by lap selection
+  const filteredSamples = useMemo(() => {
+    if (!session) return [];
+    if (lapFilter.size === 0) return session.data;
+    return session.data.filter(d => lapFilter.has(d.Lap));
+  }, [session, lapFilter]);
+
+  // Compute fuel map cells
+  const cells = useMemo(() => {
+    return computeFuelMapCells(filteredSamples, rpmBins, tpsBins, rpmRange, tpsRange);
+  }, [filteredSamples, rpmBins, tpsBins, rpmRange, tpsRange]);
+
+  const stats = useMemo(() => computeMapStats(cells, engineType), [cells, engineType]);
+
+  // ─── Render ───────────────────────────────────────────────
+  const sourceLabel = {
+    aracer_sp:  { short: "SP",  full: "aRacer App (smartphone)" },
+    aracer_ecu: { short: "ECU", full: "ECU Memory" },
+    aracer_lm:  { short: "LM",  full: "Logger Module" },
+  };
+  const srcInfo = session ? sourceLabel[session.format] : null;
+
+  return (
+    <div className="min-h-screen relative">
+      {/* Header */}
+      <header className="px-5 py-3 flex items-center justify-between" style={{ background: COLORS.panel, borderBottom: `1px solid ${COLORS.border}` }}>
+        <div className="flex items-center gap-3">
+          <div style={{ width: 4, height: 28, background: COLORS.accent }} />
+          <div>
+            <div className="font-mono uppercase tracking-[0.32em] text-base font-semibold" style={{ color: COLORS.text }}>
+              <span style={{ color: COLORS.accent }}>aRacer</span> // LAB
+            </div>
+            <div className="font-mono text-[9px] uppercase tracking-[0.25em] mt-0.5" style={{ color: COLORS.textMuted }}>
+              FUEL MAP STUDIO · v0.1
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          {/* Engine toggle */}
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>Engine</span>
+            <div className="flex" style={{ border: `1px solid ${COLORS.border}` }}>
+              {["2st", "4st"].map(t => (
+                <button key={t} onClick={() => setEngineType(t)}
+                        className="font-mono uppercase tracking-wider px-3 py-1.5 transition"
+                        style={{
+                          background: engineType === t ? COLORS.accent : "transparent",
+                          color: engineType === t ? "#000" : COLORS.textDim,
+                          fontSize: 10,
+                        }}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* About */}
+          <button onClick={() => setAboutOpen(true)}
+                  className="font-mono text-[10px] uppercase tracking-wider px-2 py-1.5 transition hover:text-white"
+                  style={{ color: COLORS.textDim, border: `1px solid ${COLORS.border}` }}>
+            ?
+          </button>
+          {/* File load */}
+          <input ref={fileInputRef} type="file" accept=".loga,text/plain"
+                 className="hidden"
+                 onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }} />
+          <button onClick={() => fileInputRef.current?.click()}
+                  className="font-mono uppercase tracking-wider px-3 py-1.5 transition"
+                  style={{ background: COLORS.accent, color: "#000", fontSize: 11 }}>
+            ↑ LOAD .loga
+          </button>
+        </div>
+      </header>
+
+      {/* Empty / error state */}
+      {!session && (
+        <main className="p-8 max-w-3xl mx-auto">
+          <div className="text-center py-16 scanlines relative" style={{ background: COLORS.panel, border: `1px dashed ${COLORS.border}` }}
+               onDragOver={(e) => e.preventDefault()}
+               onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files?.[0]) handleFile(e.dataTransfer.files[0]); }}>
+            <div className="font-mono uppercase tracking-[0.3em] text-xs mb-3" style={{ color: COLORS.accent }}>
+              READY · NO LOG LOADED
+            </div>
+            <div className="text-sm mb-6" style={{ color: COLORS.textDim }}>
+              aRacer の <code className="font-mono text-xs px-1" style={{ background: COLORS.cell, color: COLORS.accent }}>.loga</code> ファイルをドラッグ＆ドロップ、または ↑LOAD ボタンで開く
+            </div>
+            <div className="font-mono text-[10px] space-y-1" style={{ color: COLORS.textMuted }}>
+              <div>SUPPORTED · aRacer App / ECU Memory / Logger Module</div>
+              <div>SP / ECU / LM</div>
+            </div>
+          </div>
+          {parseError && (
+            <div className="mt-4 px-4 py-3 font-mono text-xs"
+                 style={{ background: "rgba(239,68,68,0.1)", border: `1px solid ${COLORS.danger}`, color: COLORS.danger }}>
+              ! {parseError}
+            </div>
+          )}
+        </main>
+      )}
+
+      {session && (
+        <main className="p-4 grid gap-3" style={{ gridTemplateColumns: "1fr 320px" }}>
+          {/* LEFT — main column */}
+          <div className="space-y-3">
+            {/* Session info */}
+            <Panel title="Session" accent>
+              <div className="px-3 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="font-mono text-sm truncate" style={{ color: COLORS.text }}>{session.name}</div>
+                  {srcInfo && (
+                    <span className="font-mono text-[9px] px-1.5 py-0.5 flex-shrink-0"
+                          style={{ background: "rgba(251,146,60,0.18)", color: COLORS.accent, border: `1px solid ${COLORS.accent}` }}>
+                      aR-{srcInfo.short}
+                    </span>
+                  )}
+                  <span className="font-mono text-[10px]" style={{ color: COLORS.textMuted }}>
+                    · {fmtTime(session.stats.duration)}
+                    · {session.data.length.toLocaleString()} samples
+                    {session.sampleStride > 1 && ` (1/${session.sampleStride} downsampled)`}
+                  </span>
+                </div>
+                <div className="font-mono text-[10px] flex items-center gap-3" style={{ color: COLORS.textMuted }}>
+                  <span>AFR: <span style={{ color: COLORS.text }}>{session.stats.validAfr.toLocaleString()}</span></span>
+                  <span>RPM: <span style={{ color: COLORS.text }}>{session.stats.validRpm.toLocaleString()}</span></span>
+                  <span>TPS: <span style={{ color: COLORS.text }}>{session.stats.validTps.toLocaleString()}</span></span>
+                </div>
+              </div>
+            </Panel>
+
+            {/* Lap filter (if applicable) */}
+            {filteredSamples.length > 0 && session.data.some(d => d.Lap > 0) && (
+              <Panel title="Lap filter" accent>
+                <LapFilter samples={session.data} lapFilter={lapFilter} setLapFilter={setLapFilter} />
+              </Panel>
+            )}
+
+            {/* Fuel map heatmap */}
+            <Panel title={`Fuel map · RPM × TPS × AFR  (engine: ${engineType.toUpperCase()})`} accent
+                   actions={
+                     <div className="font-mono text-[10px]" style={{ color: COLORS.textMuted }}>
+                       target {AFR_TARGETS[engineType].low.toFixed(1)}–{AFR_TARGETS[engineType].high.toFixed(1)} (mid {AFR_TARGETS[engineType].mid.toFixed(1)})
+                     </div>
+                   }>
+              <FuelMapHeatmap cells={cells} engineType={engineType} rpmRange={rpmRange} tpsRange={tpsRange}
+                              hoveredCell={hoveredCell} setHoveredCell={setHoveredCell} />
+            </Panel>
+
+            {/* Cell detail */}
+            <Panel title="Cell detail" accent>
+              <CellDetail hovered={hoveredCell} rpmRange={rpmRange} tpsRange={tpsRange}
+                          rpmBins={rpmBins} tpsBins={tpsBins} engineType={engineType} />
+            </Panel>
+          </div>
+
+          {/* RIGHT — sidebar */}
+          <div className="space-y-3">
+            <Panel title="Map stats" accent>
+              <StatsPanel stats={stats} rpmBins={rpmBins} tpsBins={tpsBins} rpmRange={rpmRange} tpsRange={tpsRange} />
+            </Panel>
+
+            <Panel title="AFR colour scale" accent>
+              <div className="p-3">
+                <AfrLegend engineType={engineType} />
+              </div>
+            </Panel>
+
+            <Panel title="Grid settings" accent>
+              <SettingsPanel rpmBins={rpmBins} setRpmBins={setRpmBins}
+                             tpsBins={tpsBins} setTpsBins={setTpsBins}
+                             rpmRange={rpmRange} setRpmRange={setRpmRange}
+                             tpsRange={tpsRange} setTpsRange={setTpsRange}
+                             autoRange={autoRange} setAutoRange={setAutoRange} />
+            </Panel>
+          </div>
+        </main>
+      )}
+
+      {aboutOpen && <AboutModal onClose={() => setAboutOpen(false)} />}
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
