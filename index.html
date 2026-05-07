@@ -81,8 +81,19 @@
 const { useState, useMemo, useRef, useCallback, useEffect } = React;
 
 // ─── App version & changelog ────────────────────────────────
-const APP_VERSION = "0.4.3";
+const APP_VERSION = "0.4.4";
 const CHANGELOG = [
+  {
+    version: "0.4.4",
+    date: "2026-05-07",
+    notes: [
+      "v0.4.3 の診断バッジで「13 AFR seg + 1 base · GPS 16140 pts」を観測 → AFR フィルタが過度に厳しいことが判明",
+      "AFR 妥当性チェックを撤廃：avgAfr 範囲外（エンジン停止中等）のセグメントも灰色（#666）で必ず描画する仕様に変更",
+      "FeatureGroup を経由せず、各 polyline を直接 map.addLayer する方式に変更（描画パイプラインの問題切り分けのため）",
+      "診断バッジを充実：AFR 色塗り数 / 灰色数 / base + GPS pts を分けて表示",
+      "fitBounds 前に map.invalidateSize() を呼出（コンテナサイズ不整合時の対策）",
+    ],
+  },
   {
     version: "0.4.3",
     date: "2026-05-07",
@@ -937,7 +948,7 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
     typeof window !== "undefined" && window.L ? "ready" : "loading"
   );
   const [initError, setInitError] = useState(null);
-  const [renderStats, setRenderStats] = useState({ valid: 0, segments: 0, rendered: false });
+  const [renderStats, setRenderStats] = useState({ valid: 0, segments: 0, afrColored: 0, gray: 0, rendered: false });
 
   // Leaflet ロード待機
   useEffect(() => {
@@ -981,63 +992,72 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
     const map = mapRef.current;
     if (!map || samples.length === 0) return;
     try {
-      // 既存レイヤをクリア
-      if (layersRef.current.track) { map.removeLayer(layersRef.current.track); layersRef.current.track = null; }
-      if (layersRef.current.finishLine) { map.removeLayer(layersRef.current.finishLine); layersRef.current.finishLine = null; }
+      // 既存レイヤをクリア（配列で管理する方式に変更）
+      if (Array.isArray(layersRef.current.track)) {
+        layersRef.current.track.forEach(l => { try { map.removeLayer(l); } catch(e){} });
+        layersRef.current.track = null;
+      }
+      if (layersRef.current.finishLine) { try { map.removeLayer(layersRef.current.finishLine); } catch(e){} layersRef.current.finishLine = null; }
 
       const validSamples = samples.filter(s => Number.isFinite(s.Lat) && Number.isFinite(s.Lon));
       console.log("[aRacer Lab] GPS samples valid/total:", validSamples.length, "/", samples.length);
       if (validSamples.length < 2) {
-        setRenderStats({ valid: validSamples.length, segments: 0, rendered: false });
+        setRenderStats({ valid: validSamples.length, segments: 0, afrColored: 0, gray: 0, rendered: false });
         return;
       }
 
-      // 最大 1500 セグメントに間引き（描画パフォーマンス確保）
+      // 最大 1500 セグメントに間引き
       const TARGET_SEGMENTS = 1500;
       const stride = Math.max(1, Math.floor(validSamples.length / TARGET_SEGMENTS));
 
-      // FeatureGroup で管理（getBounds 等が使える）
-      const trackGroup = window.L.featureGroup();
+      // 全レイヤを直接 map に追加し、配列で管理（FeatureGroup を経由しない）
+      const allLayers = [];
 
-      // 1) 確実に見えるベースライン（明るいオレンジ・透明度低め）を最下層に敷く
-      //    AFR 色塗りが何らかの理由で描画されなくても、走行ラインは必ず見える
+      // 1) ベースライン：bounds 計算と「最低限の視認」を担保するためのオレンジ太線
       const baseCoords = [];
       for (let i = 0; i < validSamples.length; i += stride) {
         baseCoords.push([validSamples[i].Lat, validSamples[i].Lon]);
       }
+      let baseLine = null;
       if (baseCoords.length >= 2) {
-        window.L.polyline(baseCoords, {
+        baseLine = window.L.polyline(baseCoords, {
           color: "#fb923c",
           weight: 6,
           opacity: 0.55,
           lineCap: "round",
           lineJoin: "round",
-        }).addTo(trackGroup);
+        });
+        baseLine.addTo(map);
+        allLayers.push(baseLine);
       }
 
-      // 2) AFR 色塗りセグメント（ベースライン上に重ねる）
-      let segCount = 0;
+      // 2) AFR 色塗りセグメント（無効AFRは灰色で必ず描く）
+      let afrColored = 0, gray = 0;
       for (let i = stride; i < validSamples.length; i += stride) {
         const a = validSamples[i - stride];
         const b = validSamples[i];
         const avgAfr = (a.Afr + b.Afr) / 2;
+        let color, isAfr = false;
         if (avgAfr > 5 && avgAfr < 25) {
-          const color = afrColor(avgAfr);
-          if (color) {
-            window.L.polyline([[a.Lat, a.Lon], [b.Lat, b.Lon]], {
-              color: color,
-              weight: 4,
-              opacity: 1,
-              lineCap: "round",
-            }).addTo(trackGroup);
-            segCount++;
-          }
+          const afrCol = afrColor(avgAfr);
+          if (afrCol) { color = afrCol; isAfr = true; }
+          else color = "#666";
+        } else {
+          color = "#666"; // AFR データなし／無効
         }
+        const seg = window.L.polyline([[a.Lat, a.Lon], [b.Lat, b.Lon]], {
+          color: color,
+          weight: 4,
+          opacity: 1,
+          lineCap: "round",
+        });
+        seg.addTo(map);
+        allLayers.push(seg);
+        if (isAfr) afrColored++; else gray++;
       }
 
-      trackGroup.addTo(map);
-      layersRef.current.track = trackGroup;
-      console.log("[aRacer Lab] track segments rendered:", segCount, "+ 1 base");
+      layersRef.current.track = allLayers;
+      console.log("[aRacer Lab] segments rendered: AFR=" + afrColored + " gray=" + gray + " base=" + (baseLine ? 1 : 0));
 
       // フィニッシュライン
       if (circuitDetection?.circuit) {
@@ -1050,13 +1070,17 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
         layersRef.current.finishLine = finishLine;
       }
 
-      // ビューを走行軌跡にフィット（FeatureGroup の getBounds 使用）
+      // ビューを走行軌跡にフィット
       try {
-        const bounds = trackGroup.getBounds();
-        if (bounds.isValid()) map.fitBounds(bounds, { padding: [30, 30] });
+        // baseLine の bounds を直接使う（FeatureGroup より確実）
+        if (baseLine) {
+          map.invalidateSize();
+          const bounds = baseLine.getBounds();
+          if (bounds.isValid()) map.fitBounds(bounds, { padding: [30, 30] });
+        }
       } catch(e) { console.warn("fitBounds failed:", e); }
 
-      setRenderStats({ valid: validSamples.length, segments: segCount, rendered: true });
+      setRenderStats({ valid: validSamples.length, segments: afrColored + gray, afrColored, gray, rendered: true });
 
       // クリックでセル選択
       const clickHandler = (e) => {
@@ -1072,7 +1096,7 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
       return () => { try { map.off("click", clickHandler); } catch(e){} };
     } catch (e) {
       console.error("[aRacer Lab] Track render failed:", e);
-      setRenderStats({ valid: 0, segments: 0, rendered: false });
+      setRenderStats({ valid: 0, segments: 0, afrColored: 0, gray: 0, rendered: false });
     }
   }, [leafletStatus, samples, circuitDetection, onSelectFromMap]);
 
@@ -1149,7 +1173,7 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
                       color: renderStats.rendered ? COLORS.target : COLORS.danger,
                       border: `1px solid ${renderStats.rendered ? COLORS.target : COLORS.danger}` }}>
           {renderStats.rendered
-            ? `✓ ${renderStats.segments} AFR seg + 1 base · GPS ${renderStats.valid} pts`
+            ? `✓ AFR色 ${renderStats.afrColored} / 灰 ${renderStats.gray} + base 1 · GPS ${renderStats.valid} pts`
             : `⚠ 描画失敗: GPS ${renderStats.valid} pts`}
         </div>
       )}
