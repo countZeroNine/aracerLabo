@@ -7,10 +7,14 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <style>
   :root {
     --bg-deep:      #08090b;
@@ -50,6 +54,27 @@
   .tnum { font-variant-numeric: tabular-nums; }
   /* Heatmap cell hover */
   .cell-hot { stroke: var(--accent-bright) !important; stroke-width: 2 !important; }
+  /* Leaflet dark mode adjustments */
+  .leaflet-container {
+    background: #0a0c10;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  /* タイル明るさ調整: OSM タイルが眩しいのでダーク背景に馴染むよう抑える */
+  .leaflet-tile-pane { filter: brightness(0.65) saturate(0.75) hue-rotate(180deg) invert(1); }
+  .leaflet-control-attribution {
+    background: rgba(15, 17, 21, 0.8) !important;
+    color: rgba(180, 180, 200, 0.5) !important;
+    font-size: 9px !important;
+  }
+  .leaflet-control-attribution a { color: rgba(180, 180, 200, 0.7) !important; }
+  .leaflet-control-zoom a {
+    background: #0f1115 !important;
+    color: #fb923c !important;
+    border-color: #1f2530 !important;
+  }
+  .leaflet-control-zoom a:hover {
+    background: #1a1d24 !important;
+  }
 </style>
 </head>
 <body>
@@ -200,7 +225,18 @@ const parseAracerLog = (text, format) => {
     Wbo2Ready:    findIdx("wbo2_ready"),
     PowerEn:      findIdx("power_en"),
     RpmLimit:     findIdx("rpm_limit"),
+    // GPS（LM形式 / RFM2.5装着 ECU形式 で取得可能）
+    GpsLatDeg:    findIdx("gps_lat_deg"),
+    GpsLatMin:    findIdx("gps_lat_min"),
+    GpsLatMmmm:   findIdx("gps_lat_mmmm"),
+    GpsLatNS:     findIdx("gps_lat_ns"),
+    GpsLonDeg:    findIdx("gps_lon_deg"),
+    GpsLonMin:    findIdx("gps_lon_min"),
+    GpsLonMmmm:   findIdx("gps_lon_mmmm"),
+    GpsLonEW:     findIdx("gps_lon_ew"),
+    GpsSpeed:     findIdx("gps_speed"),
   };
+  const hasGps = idx.GpsLatDeg >= 0 && idx.GpsLonDeg >= 0;
 
   // Auto-downsample if source rate >12Hz to keep memory & rendering reasonable
   const probeRows = Math.min(100, lines.length - 7);
@@ -225,6 +261,24 @@ const parseAracerLog = (text, format) => {
     const num = (i) => i >= 0 && i < parts.length ? (parseFloat(parts[i]) || 0) : 0;
     const intNum = (i) => i >= 0 && i < parts.length ? (parseInt(parts[i], 10) || 0) : 0;
 
+    // GPS デコード（NMEA 0183 風）
+    let lat = NaN, lon = NaN;
+    if (hasGps) {
+      const lDeg = num(idx.GpsLatDeg), lMin = num(idx.GpsLatMin), lMmm = num(idx.GpsLatMmmm);
+      const oDeg = num(idx.GpsLonDeg), oMin = num(idx.GpsLonMin), oMmm = num(idx.GpsLonMmmm);
+      const ns = intNum(idx.GpsLatNS), ew = intNum(idx.GpsLonEW);
+      // ASCII: N=78 S=83 E=69 W=87
+      let _lat = lDeg + (lMin + lMmm / 10000) / 60;
+      let _lon = oDeg + (oMin + oMmm / 10000) / 60;
+      if (ns === 83) _lat = -_lat;
+      if (ew === 87) _lon = -_lon;
+      // 妥当性: 範囲外（受信前等の0や異常値）はNaNにして除外できるよう
+      if (_lat >= -90 && _lat <= 90 && _lon >= -180 && _lon <= 180 &&
+          !(Math.abs(_lat) < 0.01 && Math.abs(_lon) < 0.01)) {
+        lat = _lat; lon = _lon;
+      }
+    }
+
     data.push({
       RunTime:     tMs / 1000,
       Rpm:         num(idx.Rpm),
@@ -243,10 +297,97 @@ const parseAracerLog = (text, format) => {
       Wbo2Ready:   intNum(idx.Wbo2Ready),
       PowerEn:     intNum(idx.PowerEn),
       RpmLimit:    intNum(idx.RpmLimit),
+      Lat:         lat,
+      Lon:         lon,
+      GpsSpeed:    num(idx.GpsSpeed),
     });
   }
 
-  return { data, format, sampleStride, totalRows: lines.length - 6 };
+  // GPS が実データとして存在するか（カラム名はあっても全行0だと意味がない）
+  const gpsValidCount = data.filter(d => !isNaN(d.Lat) && !isNaN(d.Lon)).length;
+  const hasValidGps = gpsValidCount > Math.max(10, data.length * 0.05);
+
+  return { data, format, sampleStride, totalRows: lines.length - 6, hasValidGps, gpsValidCount };
+};
+
+// ─── GPS / Geo ヘルパー ───────────────────────────────────────
+// ハーバサイン距離（メートル）
+const haversine = (la1, lo1, la2, lo2) => {
+  const R = 6371000;
+  const r = (x) => x * Math.PI / 180;
+  const dLa = r(la2 - la1), dLo = r(lo2 - lo1);
+  const a = Math.sin(dLa/2)**2 + Math.cos(r(la1))*Math.cos(r(la2))*Math.sin(dLo/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+};
+
+// 走行データの GPS 重心からサーキットを自動判定（距離が一定以下なら該当）
+const detectCircuit = (samples) => {
+  const valid = samples.filter(s => !isNaN(s.Lat) && !isNaN(s.Lon));
+  if (valid.length === 0) return null;
+  const cLat = valid.reduce((a, s) => a + s.Lat, 0) / valid.length;
+  const cLon = valid.reduce((a, s) => a + s.Lon, 0) / valid.length;
+  let best = null, bestDist = Infinity;
+  for (const c of CIRCUITS) {
+    // フィニッシュライン2点の中点をサーキット中心の代表として使う
+    const fLat = (c.finishLine[0].lat + c.finishLine[1].lat) / 2;
+    const fLon = (c.finishLine[0].lon + c.finishLine[1].lon) / 2;
+    const d = haversine(cLat, cLon, fLat, fLon);
+    if (d < bestDist) { bestDist = d; best = c; }
+  }
+  // 5km 以内なら該当サーキット、それ以上はサーキット未登録扱い
+  return bestDist < 5000 ? { circuit: best, distFromFinishM: bestDist, centroid: { lat: cLat, lon: cLon } } : null;
+};
+
+// 2線分の交差判定（フィニッシュライン横断検出用）
+const segmentsIntersect = (p1, p2, p3, p4) => {
+  const cross = (a, b) => a.x * b.y - a.y * b.x;
+  const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y });
+  const r = sub(p2, p1), s = sub(p4, p3);
+  const rxs = cross(r, s);
+  if (Math.abs(rxs) < 1e-12) return false;
+  const t = cross(sub(p3, p1), s) / rxs;
+  const u = cross(sub(p3, p1), r) / rxs;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+};
+
+// フィニッシュラインを基準にラップを自動分割
+// IR_LapNumber が無くても GPS 軌跡だけで動く
+const detectLapsByFinishLine = (samples, finishLine) => {
+  if (!finishLine || samples.length < 2) return [];
+  const fA = { x: finishLine[0].lon, y: finishLine[0].lat };
+  const fB = { x: finishLine[1].lon, y: finishLine[1].lat };
+  const laps = [];
+  let lapStart = 0;
+  // 最低限のラップ時間（30秒）を入れて、フィニッシュ線スキム時の二重カウントを防ぐ
+  const MIN_LAP_SEC = 30;
+  for (let i = 1; i < samples.length; i++) {
+    const a = samples[i-1], b = samples[i];
+    if (isNaN(a.Lat) || isNaN(b.Lat)) continue;
+    const p1 = { x: a.Lon, y: a.Lat };
+    const p2 = { x: b.Lon, y: b.Lat };
+    if (segmentsIntersect(p1, p2, fA, fB)) {
+      const lapDuration = b.RunTime - samples[lapStart].RunTime;
+      if (lapDuration >= MIN_LAP_SEC) {
+        laps.push({ start: lapStart, end: i, t0: samples[lapStart].RunTime, t1: b.RunTime, durationSec: lapDuration });
+        lapStart = i;
+      }
+    }
+  }
+  // 最後の不完全ラップは破棄（クールダウン区間想定）
+  return laps;
+};
+
+// セルに該当するサンプルを抽出（地図ハイライト用）
+const samplesInCell = (samples, rpmRange, tpsRange, rpmBins, tpsBins, ri, ti) => {
+  const rpmStep = (rpmRange[1] - rpmRange[0]) / rpmBins;
+  const tpsStep = (tpsRange[1] - tpsRange[0]) / tpsBins;
+  const rpmLo = rpmRange[0] + ri * rpmStep, rpmHi = rpmLo + rpmStep;
+  const tpsLo = tpsRange[0] + ti * tpsStep, tpsHi = tpsLo + tpsStep;
+  return samples.filter(s =>
+    s.Rpm >= rpmLo && s.Rpm < rpmHi &&
+    s.Tps >= tpsLo && s.Tps < tpsHi &&
+    !isNaN(s.Lat) && !isNaN(s.Lon)
+  );
 };
 
 // ─── Fuel map cell binning ───────────────────────────────────
@@ -681,6 +822,155 @@ const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
   );
 };
 
+// ─── Track View (Phase 2: GPS 位置 × AFR の地図) ─────────────
+const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange, rpmBins, tpsBins, onSelectFromMap }) => {
+  const mapDivRef = useRef(null);
+  const mapRef = useRef(null);
+  const layersRef = useRef({ track: null, highlight: null, finishLine: null, currentMarker: null });
+
+  // 地図初期化（一度だけ）
+  useEffect(() => {
+    if (!mapDivRef.current || mapRef.current) return;
+    if (!window.L) {
+      console.error("Leaflet not loaded");
+      return;
+    }
+    const map = L.map(mapDivRef.current, {
+      zoomControl: true,
+      attributionControl: true,
+      preferCanvas: true,  // ポリラインが多いのでCanvas描画
+    });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap',
+    }).addTo(map);
+    mapRef.current = map;
+
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  // GPSライン描画（AFR色塗り）
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || samples.length === 0) return;
+
+    // 既存レイヤをクリア
+    Object.values(layersRef.current).forEach(l => { if (l) map.removeLayer(l); });
+    layersRef.current = { track: null, highlight: null, finishLine: null, currentMarker: null };
+
+    const validSamples = samples.filter(s => !isNaN(s.Lat) && !isNaN(s.Lon));
+    if (validSamples.length < 2) return;
+
+    // AFR ベースの色塗り：連続するサンプルペアを polyline 化
+    // パフォーマンス対策で間引き：最大 2000 セグメント程度に
+    const stride = Math.max(1, Math.floor(validSamples.length / 2000));
+    const segments = [];
+    for (let i = stride; i < validSamples.length; i += stride) {
+      const a = validSamples[i - stride];
+      const b = validSamples[i];
+      // ペアの平均 AFR でセグメント色を決める
+      const avgAfr = (a.Afr + b.Afr) / 2;
+      const color = avgAfr > 0 ? afrColor(avgAfr) : "#444";
+      segments.push({ a, b, color, avgAfr });
+    }
+
+    // セグメントを Layer Group としてまとめる
+    const trackLayer = L.layerGroup();
+    for (const seg of segments) {
+      L.polyline([[seg.a.Lat, seg.a.Lon], [seg.b.Lat, seg.b.Lon]], {
+        color: seg.color || "#444",
+        weight: 4,
+        opacity: 0.85,
+        lineCap: "round",
+      }).addTo(trackLayer);
+    }
+    trackLayer.addTo(map);
+    layersRef.current.track = trackLayer;
+
+    // フィニッシュライン描画
+    if (circuitDetection?.circuit) {
+      const fl = circuitDetection.circuit.finishLine;
+      const finishLine = L.polyline(
+        [[fl[0].lat, fl[0].lon], [fl[1].lat, fl[1].lon]],
+        { color: "#fb923c", weight: 5, opacity: 1, dashArray: "6,4" }
+      ).bindTooltip("FINISH LINE", { permanent: false, direction: "top" });
+      finishLine.addTo(map);
+      layersRef.current.finishLine = finishLine;
+    }
+
+    // ビューを走行軌跡にフィット
+    const bounds = L.latLngBounds(validSamples.map(s => [s.Lat, s.Lon]));
+    map.fitBounds(bounds, { padding: [20, 20] });
+
+    // クリックでセル選択（最近傍点を探す）
+    const clickHandler = (e) => {
+      const click = e.latlng;
+      let best = null, bestD = Infinity;
+      for (const s of validSamples) {
+        const d = (s.Lat - click.lat) ** 2 + (s.Lon - click.lng) ** 2;
+        if (d < bestD) { bestD = d; best = s; }
+      }
+      if (best && onSelectFromMap) {
+        onSelectFromMap(best);
+      }
+    };
+    map.on("click", clickHandler);
+
+    return () => {
+      map.off("click", clickHandler);
+    };
+  }, [samples, circuitDetection, onSelectFromMap]);
+
+  // セル選択時のハイライト
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (layersRef.current.highlight) {
+      map.removeLayer(layersRef.current.highlight);
+      layersRef.current.highlight = null;
+    }
+    if (!hoveredCell) return;
+
+    const matched = samplesInCell(samples, rpmRange, tpsRange, rpmBins, tpsBins, hoveredCell.ri, hoveredCell.ti);
+    if (matched.length === 0) return;
+
+    const highlight = L.layerGroup();
+    for (const s of matched) {
+      L.circleMarker([s.Lat, s.Lon], {
+        radius: 5,
+        color: "#fff",
+        weight: 2,
+        opacity: 1,
+        fillColor: "#fb923c",
+        fillOpacity: 0.95,
+      }).addTo(highlight);
+    }
+    highlight.addTo(map);
+    layersRef.current.highlight = highlight;
+  }, [hoveredCell, samples, rpmRange, tpsRange, rpmBins, tpsBins]);
+
+  return (
+    <div className="relative">
+      <div ref={mapDivRef} style={{ height: 520, background: "#0a0c10" }} />
+      {circuitDetection?.circuit && (
+        <div className="absolute top-2 right-2 px-2 py-1 z-[400] font-mono text-[10px] uppercase tracking-wider"
+             style={{ background: "rgba(15,17,21,0.92)", color: COLORS.accent, border: `1px solid ${COLORS.borderBright}` }}>
+          {circuitDetection.circuit.name}
+        </div>
+      )}
+      {!circuitDetection && samples.length > 0 && (
+        <div className="absolute top-2 right-2 px-2 py-1 z-[400] font-mono text-[10px] uppercase tracking-wider"
+             style={{ background: "rgba(15,17,21,0.92)", color: COLORS.textMuted, border: `1px solid ${COLORS.border}` }}>
+          サーキット未登録 / GPS 範囲外
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── About modal ─────────────────────────────────────────────
 const AboutModal = ({ onClose }) => (
   <div className="fixed inset-0 flex items-center justify-center p-4 z-50" style={{ background: "rgba(0,0,0,0.85)" }} onClick={onClose}>
@@ -698,6 +988,7 @@ const AboutModal = ({ onClose }) => (
           <span style={{ color: COLORS.cool }}>● 青寄り＝濃い（リッチ／安全域）</span><br />
           <span style={{ color: COLORS.target }}>● 緑系＝目標帯域内（target 12.5–13.5）</span><br />
           <span style={{ color: COLORS.danger }}>● 赤寄り＝薄い（リーン／危険域）</span></p>
+        <p><strong style={{ color: COLORS.text }}>Track Map</strong> タブでは、GPS データを含むログでサーキット軌跡をAFR色塗り表示。ヒートマップ ⇔ 地図でセル選択を双方向リンクし、「リーン箇所がコース上のどこで発生したか」を特定可能。筑波（コース2000/1000）・もてぎ（北ショート/ロード）を自動判定。</p>
         <p className="text-xs" style={{ color: COLORS.textMuted }}>
           配色は aRacer SpeedTuning / HONDA 燃調ソフトの慣例に準拠（リーンが危険域＝赤）。<br/>
           二輪 FI 用 ECU 想定のため 4-stroke 専用。
@@ -723,6 +1014,7 @@ const App = () => {
   const [lapFilter, setLapFilter] = useState(new Set());
   const [hoveredCell, setHoveredCell] = useState(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [viewMode, setViewMode] = useState("heatmap"); // "heatmap" | "track"
   const fileInputRef = useRef(null);
 
   // Auto-adjust RPM range when a new file is loaded
@@ -744,7 +1036,7 @@ const App = () => {
         setParseError(`${file.name}: aRacer .loga 形式ではありません`);
         return;
       }
-      const { data, format, sampleStride, totalRows } = parseAracerLog(text, fmt);
+      const { data, format, sampleStride, totalRows, hasValidGps, gpsValidCount } = parseAracerLog(text, fmt);
       if (!data.length) {
         setParseError(`${file.name}: データ行が空です`);
         return;
@@ -759,12 +1051,35 @@ const App = () => {
         return;
       }
 
+      // GPS が取れていればサーキット自動判定とラップ自動分割
+      let circuitDetection = null;
+      let autoLaps = [];
+      if (hasValidGps) {
+        circuitDetection = detectCircuit(data);
+        if (circuitDetection?.circuit?.finishLine) {
+          autoLaps = detectLapsByFinishLine(data, circuitDetection.circuit.finishLine);
+          // autoLaps を data の Lap フィールドへ反映（IR_LapNumber が無いログでもラップフィルタが効くように）
+          if (autoLaps.length > 0) {
+            // 各ラップの範囲を Lap=1, 2, ... と振り直す（既存 IR_LapNumber は上書き）
+            for (let lapI = 0; lapI < autoLaps.length; lapI++) {
+              for (let i = autoLaps[lapI].start; i < autoLaps[lapI].end; i++) {
+                data[i].Lap = lapI + 1;
+              }
+            }
+          }
+        }
+      }
+
       setSession({
         name: file.name.replace(/\.loga$/i, ""),
         format,
         data,
         sampleStride,
         totalRows,
+        hasValidGps,
+        gpsValidCount,
+        circuitDetection,
+        autoLaps,
         stats: {
           validAfr, validRpm, validTps,
           duration: data[data.length - 1].RunTime - data[0].RunTime,
@@ -772,6 +1087,8 @@ const App = () => {
       });
       setLapFilter(new Set());
       setHoveredCell(null);
+      // GPS 有りなら最初は track ビューを見せる方が新ユーザーに価値が伝わりやすい
+      // ...と思ったが、ヒートマップが本筋なのでデフォルトはヒートマップ維持
     } catch (e) {
       setParseError(`${file.name}: ${e.message}`);
     }
@@ -790,6 +1107,21 @@ const App = () => {
   }, [filteredSamples, rpmBins, tpsBins, rpmRange, tpsRange]);
 
   const stats = useMemo(() => computeMapStats(cells), [cells]);
+
+  // 地図クリック → 該当セルをヒートマップ側でハイライト
+  const handleSelectFromMap = useCallback((sample) => {
+    if (!sample) return;
+    const rpmStep = (rpmRange[1] - rpmRange[0]) / rpmBins;
+    const tpsStep = (tpsRange[1] - tpsRange[0]) / tpsBins;
+    const ri = Math.floor((sample.Rpm - rpmRange[0]) / rpmStep);
+    const ti = Math.floor((sample.Tps - tpsRange[0]) / tpsStep);
+    if (ri < 0 || ri >= rpmBins || ti < 0 || ti >= tpsBins) return;
+    const cell = cells[ti]?.[ri];
+    if (!cell) return;
+    setHoveredCell({ cell, ri, ti });
+    // モバイル時のみヒートマップに自動切替（デスクトップは地図側を見続けたい想定）
+    if (window.innerWidth < 1024) setViewMode("heatmap");
+  }, [cells, rpmRange, tpsRange, rpmBins, tpsBins]);
 
   // ─── Render ───────────────────────────────────────────────
   const sourceLabel = {
@@ -857,9 +1189,12 @@ const App = () => {
             <ol className="text-sm space-y-1.5 pl-1" style={{ color: COLORS.textDim }}>
               <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>01</span>下のエリアに <code className="font-mono text-xs px-1" style={{ background: COLORS.cell, color: COLORS.accent }}>.loga</code> をドロップ、または ↑LOAD ボタンで開く</li>
               <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>02</span>ヒートマップで <span style={{ color: COLORS.danger }}>赤いセル（リーン＝危険）</span>を最優先、続いて <span style={{ color: COLORS.cool }}>濃すぎる青</span>を探す</li>
-              <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>03</span>気になるセルをタップ／ホバーして RPM・TPS 帯域と AFR・サンプル数を確認</li>
+              <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>03</span>気になるセルをタップ／ホバー → <strong style={{ color: COLORS.accent }}>Track Map タブ</strong>に切り替えて、それがサーキット上のどこで起きたかを確認</li>
               <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>04</span>SpeedTuning 側で対応セルの燃料補正を調整</li>
             </ol>
+            <div className="mt-3 px-3 py-2 font-mono text-[10px]" style={{ background: COLORS.cell, color: COLORS.textMuted }}>
+              Track Map は GPS データがあるログ（Logger Module / RFM2.5 装着 ECU）でのみ有効。サーキット位置から自動で筑波・もてぎを判定します。
+            </div>
           </div>
 
           {/* Drop zone */}
@@ -922,15 +1257,51 @@ const App = () => {
               </Panel>
             )}
 
-            {/* Fuel map heatmap */}
-            <Panel title="Fuel map · RPM × TPS × AFR" accent
+            {/* View toggle: Heatmap / Track */}
+            <Panel title="View" accent
                    actions={
                      <div className="font-mono text-[10px]" style={{ color: COLORS.textMuted }}>
-                       target {AFR_TARGET.low.toFixed(1)}–{AFR_TARGET.high.toFixed(1)} (mid {AFR_TARGET.mid.toFixed(1)})
+                       {viewMode === "heatmap"
+                         ? `target ${AFR_TARGET.low.toFixed(1)}–${AFR_TARGET.high.toFixed(1)} (mid ${AFR_TARGET.mid.toFixed(1)})`
+                         : (session.hasValidGps
+                             ? `${session.gpsValidCount} GPS pts · ${session.autoLaps?.length || 0} laps detected`
+                             : "GPS データなし")}
                      </div>
                    }>
-              <FuelMapHeatmap cells={cells} rpmRange={rpmRange} tpsRange={tpsRange}
-                              hoveredCell={hoveredCell} setHoveredCell={setHoveredCell} />
+              <div className="flex border-b" style={{ borderColor: COLORS.border }}>
+                <button onClick={() => setViewMode("heatmap")}
+                        className="font-mono text-[10px] uppercase tracking-wider px-4 py-2 transition flex-1"
+                        style={{
+                          background: viewMode === "heatmap" ? COLORS.cell : "transparent",
+                          color: viewMode === "heatmap" ? COLORS.accent : COLORS.textMuted,
+                          borderBottom: viewMode === "heatmap" ? `2px solid ${COLORS.accent}` : "2px solid transparent",
+                        }}>
+                  ▦ Heatmap
+                </button>
+                <button onClick={() => setViewMode("track")}
+                        disabled={!session.hasValidGps}
+                        className="font-mono text-[10px] uppercase tracking-wider px-4 py-2 transition flex-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{
+                          background: viewMode === "track" ? COLORS.cell : "transparent",
+                          color: viewMode === "track" ? COLORS.accent : COLORS.textMuted,
+                          borderBottom: viewMode === "track" ? `2px solid ${COLORS.accent}` : "2px solid transparent",
+                        }}>
+                  ◉ Track Map {!session.hasValidGps && "(GPS なし)"}
+                </button>
+              </div>
+
+              {viewMode === "heatmap" && (
+                <FuelMapHeatmap cells={cells} rpmRange={rpmRange} tpsRange={tpsRange}
+                                hoveredCell={hoveredCell} setHoveredCell={setHoveredCell} />
+              )}
+              {viewMode === "track" && session.hasValidGps && (
+                <TrackView samples={filteredSamples}
+                           circuitDetection={session.circuitDetection}
+                           hoveredCell={hoveredCell}
+                           rpmRange={rpmRange} tpsRange={tpsRange}
+                           rpmBins={rpmBins} tpsBins={tpsBins}
+                           onSelectFromMap={handleSelectFromMap} />
+              )}
             </Panel>
 
             {/* Cell detail */}
