@@ -81,8 +81,17 @@
 const { useState, useMemo, useRef, useCallback, useEffect } = React;
 
 // ─── App version & changelog ────────────────────────────────
-const APP_VERSION = "0.4.1";
+const APP_VERSION = "0.4.2";
 const CHANGELOG = [
+  {
+    version: "0.4.2",
+    date: "2026-05-07",
+    notes: [
+      "Track Map で AFR 色塗りラインが表示されない問題を修正：preferCanvas を外して SVG レンダラに変更（Canvas のタブ切替時初期化問題回避）",
+      "ライン視認性を向上：太さ 4→5px、フォールバック色 #444→#888、影効果（黒の太線）を下に敷いて地図上で視覚的に浮き立たせる",
+      "Track Map 左下に「AFR連携」説明バナーを追加：ライン色の意味とヒートマップ⇔地図の双方向リンクの操作方法を明示",
+    ],
+  },
   {
     version: "0.4.1",
     date: "2026-05-07",
@@ -935,7 +944,7 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
       const map = window.L.map(mapDivRef.current, {
         zoomControl: true,
         attributionControl: true,
-        preferCanvas: true,
+        // preferCanvas は外す。タブ切替時の Canvas 初期化問題で polyline が描画されないケースがあるため、SVG レンダラ（デフォルト）を使う
       });
       window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
         maxZoom: 19,
@@ -970,16 +979,30 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
       // パフォーマンス対策：最大 2000 セグメント程度に間引き
       const stride = Math.max(1, Math.floor(validSamples.length / 2000));
       const trackLayer = window.L.layerGroup();
+      // 視認性向上のため、まず濃い暗色の太いライン（影/縁取り効果）を下に敷く
+      const shadowPath = [];
+      for (let i = 0; i < validSamples.length; i += stride) {
+        shadowPath.push([validSamples[i].Lat, validSamples[i].Lon]);
+      }
+      window.L.polyline(shadowPath, {
+        color: "#000",
+        weight: 7,
+        opacity: 0.45,
+        lineCap: "round",
+        lineJoin: "round",
+      }).addTo(trackLayer);
+      // 上に AFR 色塗りセグメントを重ねる
       for (let i = stride; i < validSamples.length; i += stride) {
         const a = validSamples[i - stride];
         const b = validSamples[i];
         const avgAfr = (a.Afr + b.Afr) / 2;
-        const color = avgAfr > 0 ? afrColor(avgAfr) : "#444";
+        const color = avgAfr > 0 ? afrColor(avgAfr) : "#888";
         window.L.polyline([[a.Lat, a.Lon], [b.Lat, b.Lon]], {
-          color: color || "#444",
-          weight: 4,
-          opacity: 0.85,
+          color: color || "#888",
+          weight: 5,
+          opacity: 1,
           lineCap: "round",
+          lineJoin: "round",
         }).addTo(trackLayer);
       }
       trackLayer.addTo(map);
@@ -1081,6 +1104,16 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
         <div className="absolute top-2 right-2 px-2 py-1 z-[400] font-mono text-[10px] uppercase tracking-wider"
              style={{ background: "rgba(15,17,21,0.92)", color: COLORS.textMuted, border: `1px solid ${COLORS.border}` }}>
           サーキット未登録 / GPS 範囲外
+        </div>
+      )}
+      {/* AFR連携の説明バナー（左下） */}
+      {leafletStatus === "ready" && samples.length > 0 && (
+        <div className="absolute bottom-2 left-2 px-2 py-1.5 z-[400] font-mono text-[10px] leading-tight"
+             style={{ background: "rgba(15,17,21,0.92)", color: COLORS.textDim, border: `1px solid ${COLORS.border}`, maxWidth: 280 }}>
+          <div style={{ color: COLORS.accent, marginBottom: 2 }}>▸ AFR連携</div>
+          ライン色 = 走行時の AFR（<span style={{ color: COLORS.cool }}>青=リッチ</span> / <span style={{ color: COLORS.target }}>緑=目標</span> / <span style={{ color: COLORS.danger }}>赤=リーン</span>）<br/>
+          ヒートマップでセル選択 → 該当区間がオレンジで強調<br/>
+          地図クリック → 最寄り点をヒートマップでハイライト
         </div>
       )}
     </div>
