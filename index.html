@@ -226,6 +226,11 @@ const parseAracerLog = (text, format) => {
     PowerEn:      findIdx("power_en"),
     RpmLimit:     findIdx("rpm_limit"),
     // GPS（LM形式 / RFM2.5装着 ECU形式 で取得可能）
+    // 2系統のカラム命名規則に対応：
+    //   (a) SP形式（aRacer Smart アプリ公式マニュアル準拠）: GPS_latitude / GPS_longitude を十進度で直接保持
+    //   (b) LM/ECU形式（NMEA 0183 風 multi-column DMS）: GPS_Lat_deg / GPS_Lat_min / GPS_Lat_mmmm / GPS_Lat_NS
+    GpsLatDecimal: findIdx("gps_latitude"),
+    GpsLonDecimal: findIdx("gps_longitude"),
     GpsLatDeg:    findIdx("gps_lat_deg"),
     GpsLatMin:    findIdx("gps_lat_min"),
     GpsLatMmmm:   findIdx("gps_lat_mmmm"),
@@ -236,7 +241,9 @@ const parseAracerLog = (text, format) => {
     GpsLonEW:     findIdx("gps_lon_ew"),
     GpsSpeed:     findIdx("gps_speed"),
   };
-  const hasGps = idx.GpsLatDeg >= 0 && idx.GpsLonDeg >= 0;
+  const hasGpsDecimal = idx.GpsLatDecimal >= 0 && idx.GpsLonDecimal >= 0;
+  const hasGpsDms = idx.GpsLatDeg >= 0 && idx.GpsLonDeg >= 0;
+  const hasGps = hasGpsDecimal || hasGpsDms;
 
   // Auto-downsample if source rate >12Hz to keep memory & rendering reasonable
   const probeRows = Math.min(100, lines.length - 7);
@@ -261,9 +268,17 @@ const parseAracerLog = (text, format) => {
     const num = (i) => i >= 0 && i < parts.length ? (parseFloat(parts[i]) || 0) : 0;
     const intNum = (i) => i >= 0 && i < parts.length ? (parseInt(parts[i], 10) || 0) : 0;
 
-    // GPS デコード（NMEA 0183 風）
+    // GPS デコード
     let lat = NaN, lon = NaN;
-    if (hasGps) {
+    if (hasGpsDecimal) {
+      // SP形式: 十進度をそのまま使用
+      const _lat = num(idx.GpsLatDecimal), _lon = num(idx.GpsLonDecimal);
+      if (_lat >= -90 && _lat <= 90 && _lon >= -180 && _lon <= 180 &&
+          !(Math.abs(_lat) < 0.01 && Math.abs(_lon) < 0.01)) {
+        lat = _lat; lon = _lon;
+      }
+    } else if (hasGpsDms) {
+      // LM/ECU形式: NMEA 0183 風 deg + min + 1/10000分 + 半球
       const lDeg = num(idx.GpsLatDeg), lMin = num(idx.GpsLatMin), lMmm = num(idx.GpsLatMmmm);
       const oDeg = num(idx.GpsLonDeg), oMin = num(idx.GpsLonMin), oMmm = num(idx.GpsLonMmmm);
       const ns = intNum(idx.GpsLatNS), ew = intNum(idx.GpsLonEW);
@@ -272,7 +287,6 @@ const parseAracerLog = (text, format) => {
       let _lon = oDeg + (oMin + oMmm / 10000) / 60;
       if (ns === 83) _lat = -_lat;
       if (ew === 87) _lon = -_lon;
-      // 妥当性: 範囲外（受信前等の0や異常値）はNaNにして除外できるよう
       if (_lat >= -90 && _lat <= 90 && _lon >= -180 && _lon <= 180 &&
           !(Math.abs(_lat) < 0.01 && Math.abs(_lon) < 0.01)) {
         lat = _lat; lon = _lon;
@@ -512,9 +526,10 @@ const FuelMapHeatmap = ({ cells, rpmRange, tpsRange, hoveredCell, setHoveredCell
 
   // Cell renderer
   const cellEl = (cell, ri, ti) => {
-    // TPS axis flipped so 100% (high TPS) is at the top
+    // aRacer SpeedTuning 公式の D3Cyl1_VM 等と同じ軸方向：
+    //   横軸 = RPM（左→右に増加）、縦軸 = TPS（上→下に増加、低TPS が上）
     const x = padL + ri * cellW;
-    const y = padT + (tpsBins - 1 - ti) * cellH;
+    const y = padT + ti * cellH;
     const isHover = hoveredCell && hoveredCell.ri === ri && hoveredCell.ti === ti;
     const fill = cell.count > 0 ? afrColor(cell.medianAfr) : COLORS.cell;
     // 文字色：リッチ側(青背景)とリーン側(赤背景)はどちらも暗いので白、中央(緑〜黄)は黒
@@ -552,9 +567,10 @@ const FuelMapHeatmap = ({ cells, rpmRange, tpsRange, hoveredCell, setHoveredCell
   };
 
   // Axis labels
+  // TPS は上から下に増加（aRacer SpeedTuning と同じ向き）
   const tpsLabels = [];
   for (let i = 0; i <= tpsBins; i++) {
-    const tps = tpsRange[1] - i * (tpsRange[1] - tpsRange[0]) / tpsBins;
+    const tps = tpsRange[0] + i * (tpsRange[1] - tpsRange[0]) / tpsBins;
     tpsLabels.push(
       <text key={`ty${i}`} x={padL - 6} y={padT + i * cellH}
             textAnchor="end" dominantBaseline="middle"
