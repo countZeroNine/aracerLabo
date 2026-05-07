@@ -75,28 +75,70 @@ const COLORS = {
   textMuted: "var(--text-muted)",
 };
 
-// AFR target bands per engine type
-const AFR_TARGETS = {
-  "2st": { low: 11.5, mid: 12.0, high: 12.5 },
-  "4st": { low: 12.5, mid: 13.0, high: 13.5 },
-};
+// AFR target band (4-stroke FI; aRacer は二輪FI用ECUのため4st決め打ち)
+// 安全域(rich) ← target ← 危険域(lean) の方向で考える
+const AFR_TARGET = { low: 12.5, mid: 13.0, high: 13.5 };
 const AFR_DISPLAY_MIN = 8.0;
 const AFR_DISPLAY_MAX = 18.0;
 
+// ─── Circuit DB（Phase 2 GPS連携で使用） ──────────────────────
+// 3号機（Z125 Pro）の常用サーキット。フィニッシュラインは2点の線分で定義。
+// 自動判定はGPSデータ重心から最近傍サーキットを選ぶ。該当なしは手動定義（Phase 2で実装）
+const CIRCUITS = [
+  {
+    id: "tsukuba_2000",
+    name: "筑波サーキット コース2000",
+    note: "本戦・練習想定",
+    finishLine: [
+      { lat: 36.1501667, lon: 139.9194167 },  // A: 36°09'00.6"N 139°55'09.9"E
+      { lat: 36.1500556, lon: 139.9200556 },  // B: 36°09'00.2"N 139°55'12.2"E
+    ],
+  },
+  {
+    id: "tsukuba_1000",
+    name: "筑波サーキット コース1000",
+    note: "練習・ミニバイク戦",
+    finishLine: [
+      { lat: 36.1510833, lon: 139.9247778 },  // A: 36°09'03.9"N 139°55'29.2"E
+      { lat: 36.1510000, lon: 139.9251389 },  // B: 36°09'03.6"N 139°55'30.5"E
+    ],
+  },
+  {
+    id: "motegi_kart_north",
+    name: "モビリティリゾートもてぎ 北ショートコース",
+    note: "カート場",
+    finishLine: [
+      { lat: 36.5385000, lon: 140.2319167 },  // A: 36°32'18.6"N 140°13'54.9"E
+      { lat: 36.5384722, lon: 140.2323611 },  // B: 36°32'18.5"N 140°13'56.5"E
+    ],
+  },
+  {
+    id: "motegi_road",
+    name: "モビリティリゾートもてぎ ロードコース",
+    note: "フルコース走行用",
+    finishLine: [
+      { lat: 36.5330000, lon: 140.2266389 },  // A: 36°31'58.8"N 140°13'35.9"E
+      { lat: 36.5331389, lon: 140.2269444 },  // B: 36°31'59.3"N 140°13'37.0"E
+    ],
+  },
+];
+
 // 8-stop HSL gradient for AFR colormap, calibrated to engine target band
-// blue (very lean) → teal → green (target low) → lime (target mid) → yellow-green → yellow (stoich) → orange (rich) → red (very rich)
-const afrColor = (afr, engineType) => {
+// 配色慣例：青 = 濃い（リッチ・安全域）、赤 = 薄い（リーン・危険域）
+//   aRacer SpeedTuning / HONDA 燃調ソフトの慣例に準拠
+//   blue (very rich) → teal → green (target low) → lime (target mid) → yellow-green → yellow (stoich) → orange (lean) → red (very lean)
+const afrColor = (afr) => {
   if (afr <= 0 || isNaN(afr)) return null;
-  const t = AFR_TARGETS[engineType] || AFR_TARGETS["4st"];
+  const t = AFR_TARGET;
   const stops = [
-    { afr: AFR_DISPLAY_MIN, color: [220, 80, 50] },   // deep blue
+    { afr: AFR_DISPLAY_MIN, color: [220, 80, 50] },   // deep blue (very rich, safe)
     { afr: 11.0,            color: [200, 70, 50] },   // blue
     { afr: t.low,           color: [170, 65, 45] },   // teal
     { afr: t.mid,           color: [110, 70, 45] },   // green / target
     { afr: t.high,          color: [80,  70, 50] },   // yellow-green
     { afr: 14.7,            color: [50,  85, 55] },   // yellow / stoich
     { afr: 16.5,            color: [25,  85, 55] },   // orange
-    { afr: AFR_DISPLAY_MAX, color: [0,   80, 50] },   // deep red
+    { afr: AFR_DISPLAY_MAX, color: [0,   80, 50] },   // deep red (very lean, danger)
   ];
   for (let i = 1; i < stops.length; i++) {
     if (afr <= stops[i].afr) {
@@ -246,8 +288,8 @@ const computeFuelMapCells = (samples, rpmBins, tpsBins, rpmRange, tpsRange) => {
 };
 
 // ─── Stats summary across all cells ──────────────────────────
-const computeMapStats = (cells, engineType) => {
-  const target = AFR_TARGETS[engineType];
+const computeMapStats = (cells) => {
+  const target = AFR_TARGET;
   let total = 0, withData = 0, inTarget = 0, tooRich = 0, tooLean = 0;
   let maxCount = 0, busyCell = null;
   for (let ti = 0; ti < cells.length; ti++) {
@@ -315,7 +357,7 @@ const Stat = ({ label, value, unit, color }) => (
 );
 
 // ─── Fuel map heatmap (the centerpiece) ──────────────────────
-const FuelMapHeatmap = ({ cells, engineType, rpmRange, tpsRange, hoveredCell, setHoveredCell }) => {
+const FuelMapHeatmap = ({ cells, rpmRange, tpsRange, hoveredCell, setHoveredCell }) => {
   const tpsBins = cells.length;
   const rpmBins = cells[0]?.length || 0;
   if (!rpmBins) return null;
@@ -325,7 +367,7 @@ const FuelMapHeatmap = ({ cells, engineType, rpmRange, tpsRange, hoveredCell, se
   const w = padL + rpmBins * cellW + padR;
   const h = padT + tpsBins * cellH + padB;
 
-  const target = AFR_TARGETS[engineType];
+  const target = AFR_TARGET;
 
   // Cell renderer
   const cellEl = (cell, ri, ti) => {
@@ -333,11 +375,15 @@ const FuelMapHeatmap = ({ cells, engineType, rpmRange, tpsRange, hoveredCell, se
     const x = padL + ri * cellW;
     const y = padT + (tpsBins - 1 - ti) * cellH;
     const isHover = hoveredCell && hoveredCell.ri === ri && hoveredCell.ti === ti;
-    const fill = cell.count > 0 ? afrColor(cell.medianAfr, engineType) : COLORS.cell;
+    const fill = cell.count > 0 ? afrColor(cell.medianAfr) : COLORS.cell;
+    // 文字色：リッチ側(青背景)とリーン側(赤背景)はどちらも暗いので白、中央(緑〜黄)は黒
+    const useLightText = cell.count > 0 && (cell.medianAfr < 11.5 || cell.medianAfr > 15.5);
 
     return (
       <g key={`${ri}-${ti}`}
-         onMouseEnter={() => setHoveredCell({ cell, ri, ti })}>
+         onMouseEnter={() => setHoveredCell({ cell, ri, ti })}
+         onClick={() => setHoveredCell({ cell, ri, ti })}
+         style={{ cursor: cell.count > 0 ? "pointer" : "default" }}>
         <rect x={x} y={y} width={cellW} height={cellH}
               fill={fill} stroke={isHover ? "var(--accent-bright)" : "#0a0a0d"}
               strokeWidth={isHover ? 2 : 0.5}
@@ -347,13 +393,15 @@ const FuelMapHeatmap = ({ cells, engineType, rpmRange, tpsRange, hoveredCell, se
             <text x={x + cellW / 2} y={y + cellH / 2 - 1}
                   textAnchor="middle" dominantBaseline="central"
                   fontSize={11} fontFamily="JetBrains Mono" fontWeight={600}
-                  fill={cell.medianAfr < 12 ? "#fff" : cell.medianAfr > 14.5 ? "#000" : "rgba(0,0,0,0.85)"}>
+                  fill={useLightText ? "#fff" : "rgba(0,0,0,0.85)"}
+                  pointerEvents="none">
               {cell.medianAfr.toFixed(1)}
             </text>
             <text x={x + cellW / 2} y={y + cellH / 2 + 9}
                   textAnchor="middle"
                   fontSize={7} fontFamily="JetBrains Mono"
-                  fill={cell.medianAfr < 12 ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.55)"}>
+                  fill={useLightText ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.55)"}
+                  pointerEvents="none">
               n={cell.count}
             </text>
           </>
@@ -387,8 +435,11 @@ const FuelMapHeatmap = ({ cells, engineType, rpmRange, tpsRange, hoveredCell, se
   }
 
   return (
-    <div className="p-3" onMouseLeave={() => setHoveredCell(null)}>
-      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxHeight: 600 }}>
+    <div className="p-3 overflow-x-auto" onMouseLeave={() => setHoveredCell(null)}>
+      <svg viewBox={`0 0 ${w} ${h}`}
+           preserveAspectRatio="xMinYMin meet"
+           className="block"
+           style={{ minWidth: w * 0.85, width: "100%", maxHeight: 600 }}>
         {/* Axis title: TPS */}
         <text x={14} y={padT + tpsBins * cellH / 2}
               textAnchor="middle"
@@ -413,15 +464,15 @@ const FuelMapHeatmap = ({ cells, engineType, rpmRange, tpsRange, hoveredCell, se
 };
 
 // ─── AFR colour legend with target band overlay ──────────────
-const AfrLegend = ({ engineType }) => {
-  const target = AFR_TARGETS[engineType];
+const AfrLegend = () => {
+  const target = AFR_TARGET;
   const w = 320, h = 50;
   const stops = 60;
   const steps = [];
   for (let i = 0; i < stops; i++) {
     const t = i / (stops - 1);
     const afr = AFR_DISPLAY_MIN + t * (AFR_DISPLAY_MAX - AFR_DISPLAY_MIN);
-    steps.push({ x: (i * w) / stops, color: afrColor(afr, engineType) });
+    steps.push({ x: (i * w) / stops, color: afrColor(afr) });
   }
   const targetX = (afr) => ((afr - AFR_DISPLAY_MIN) / (AFR_DISPLAY_MAX - AFR_DISPLAY_MIN)) * w;
   return (
@@ -443,20 +494,29 @@ const AfrLegend = ({ engineType }) => {
           </text>
         </g>
       ))}
+      {/* Direction hints: rich(safe) ← target → lean(danger) */}
+      <text x={targetX(9)} y={48} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono"
+            fill={COLORS.cool} letterSpacing="0.1em">
+        ← RICH (safe)
+      </text>
       <text x={targetX(target.mid)} y={48} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono"
             fill={COLORS.accent} letterSpacing="0.15em">
-        TARGET {engineType.toUpperCase()}
+        TARGET
+      </text>
+      <text x={targetX(17)} y={48} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono"
+            fill={COLORS.danger} letterSpacing="0.1em">
+        LEAN (danger) →
       </text>
     </svg>
   );
 };
 
 // ─── Cell detail readout ─────────────────────────────────────
-const CellDetail = ({ hovered, rpmRange, tpsRange, rpmBins, tpsBins, engineType }) => {
+const CellDetail = ({ hovered, rpmRange, tpsRange, rpmBins, tpsBins }) => {
   if (!hovered) {
     return (
       <div className="p-3 font-mono text-[10px]" style={{ color: COLORS.textMuted }}>
-        セルにマウスを乗せると詳細が表示されます
+        セルをタップ／ホバーすると詳細が表示されます
       </div>
     );
   }
@@ -465,12 +525,13 @@ const CellDetail = ({ hovered, rpmRange, tpsRange, rpmBins, tpsBins, engineType 
   const rpmHi = rpmRange[0] + (ri + 1) * (rpmRange[1] - rpmRange[0]) / rpmBins;
   const tpsLo = tpsRange[0] + ti * (tpsRange[1] - tpsRange[0]) / tpsBins;
   const tpsHi = tpsRange[0] + (ti + 1) * (tpsRange[1] - tpsRange[0]) / tpsBins;
-  const target = AFR_TARGETS[engineType];
+  const target = AFR_TARGET;
 
+  // Status色：リッチ=安全(青), リーン=危険(赤), 目標帯域内=緑（aRacer/HONDA慣例）
   let band = "—", bandColor = COLORS.textMuted;
   if (cell.count > 0) {
-    if (cell.medianAfr < target.low) { band = "RICH"; bandColor = COLORS.danger; }
-    else if (cell.medianAfr > target.high) { band = "LEAN"; bandColor = COLORS.cool; }
+    if (cell.medianAfr < target.low) { band = "RICH"; bandColor = COLORS.cool; }
+    else if (cell.medianAfr > target.high) { band = "LEAN"; bandColor = COLORS.danger; }
     else { band = "TARGET"; bandColor = COLORS.target; }
   }
 
@@ -521,8 +582,8 @@ const StatsPanel = ({ stats, rpmBins, tpsBins, rpmRange, tpsRange }) => {
     <div className="p-3 grid grid-cols-2 gap-x-4 gap-y-3">
       <Stat label="Cells covered" value={`${stats.withData}/${stats.total}`} unit={`(${coverage.toFixed(0)}%)`} />
       <Stat label="In target" value={`${stats.inTarget}/${stats.withData}`} unit={`(${inTargetPct.toFixed(0)}%)`} color={COLORS.target} />
-      <Stat label="Too rich" value={stats.tooRich} color={COLORS.danger} />
-      <Stat label="Too lean" value={stats.tooLean} color={COLORS.cool} />
+      <Stat label="Too rich" value={stats.tooRich} color={COLORS.cool} />
+      <Stat label="Too lean" value={stats.tooLean} color={COLORS.danger} />
       {stats.busyCell && (
         <div className="col-span-2 mt-1 pt-2" style={{ borderTop: `1px dashed ${COLORS.border}` }}>
           <div className="font-mono text-[9px] uppercase tracking-[0.2em] mb-0.5" style={{ color: COLORS.textMuted }}>Busiest cell</div>
@@ -632,8 +693,15 @@ const AboutModal = ({ onClose }) => (
         <button onClick={onClose} className="font-mono text-sm hover:text-white" style={{ color: COLORS.textDim }}>× CLOSE</button>
       </div>
       <div className="text-sm space-y-3 mt-4" style={{ color: COLORS.textDim }}>
-        <p>aRacer Super2 / Mini5 / Logger Module の <code className="font-mono text-xs" style={{ color: COLORS.accent }}>.loga</code> ログを読み込んで、燃調マップ（RPM × TPS × AFR）を可視化するツールです。</p>
-        <p>各セルの色は <strong style={{ color: COLORS.text }}>実走時の AFR 中央値</strong>、数字は AFR とサンプル数。緑系セルは目標帯域内、青寄りはリーン、赤寄りはリッチ。</p>
+        <p>aRacer RC Super2 / Super / Mini5 / Logger Module の <code className="font-mono text-xs" style={{ color: COLORS.accent }}>.loga</code> ログを読み込んで、燃調マップ（RPM × TPS × AFR）を可視化する**診断ツール**です。実走で AFR がどこに着地したかを見て、SpeedTuning で何を直すべきかを特定するのが目的。</p>
+        <p>各セルの色は <strong style={{ color: COLORS.text }}>実走時の AFR 中央値</strong>、数字は AFR とサンプル数。<br />
+          <span style={{ color: COLORS.cool }}>● 青寄り＝濃い（リッチ／安全域）</span><br />
+          <span style={{ color: COLORS.target }}>● 緑系＝目標帯域内（target 12.5–13.5）</span><br />
+          <span style={{ color: COLORS.danger }}>● 赤寄り＝薄い（リーン／危険域）</span></p>
+        <p className="text-xs" style={{ color: COLORS.textMuted }}>
+          配色は aRacer SpeedTuning / HONDA 燃調ソフトの慣例に準拠（リーンが危険域＝赤）。<br/>
+          aRacer は二輪 FI 車両用 ECU のため 4-stroke 専用。
+        </p>
         <p style={{ color: COLORS.textMuted }} className="text-xs pt-2" >
           データはブラウザ内で処理され、外部サーバーには送信されません。<br/>
           aRacer は Aracer Mechatronic Inc. の製品名です。本ツールは非公式な解析ツールです。
@@ -647,7 +715,6 @@ const AboutModal = ({ onClose }) => (
 const App = () => {
   const [session, setSession] = useState(null);
   const [parseError, setParseError] = useState(null);
-  const [engineType, setEngineType] = useState("4st");
   const [rpmBins, setRpmBins] = useState(16);
   const [tpsBins, setTpsBins] = useState(16);
   const [rpmRange, setRpmRange] = useState([1000, 14000]);
@@ -722,7 +789,7 @@ const App = () => {
     return computeFuelMapCells(filteredSamples, rpmBins, tpsBins, rpmRange, tpsRange);
   }, [filteredSamples, rpmBins, tpsBins, rpmRange, tpsRange]);
 
-  const stats = useMemo(() => computeMapStats(cells, engineType), [cells, engineType]);
+  const stats = useMemo(() => computeMapStats(cells), [cells]);
 
   // ─── Render ───────────────────────────────────────────────
   const sourceLabel = {
@@ -735,7 +802,7 @@ const App = () => {
   return (
     <div className="min-h-screen relative">
       {/* Header */}
-      <header className="px-5 py-3 flex items-center justify-between" style={{ background: COLORS.panel, borderBottom: `1px solid ${COLORS.border}` }}>
+      <header className="px-4 sm:px-5 py-3 flex flex-wrap items-center gap-3 justify-between" style={{ background: COLORS.panel, borderBottom: `1px solid ${COLORS.border}` }}>
         <div className="flex items-center gap-3">
           <div style={{ width: 4, height: 28, background: COLORS.accent }} />
           <div>
@@ -747,24 +814,7 @@ const App = () => {
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          {/* Engine toggle */}
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-[9px] uppercase tracking-[0.2em]" style={{ color: COLORS.textMuted }}>Engine</span>
-            <div className="flex" style={{ border: `1px solid ${COLORS.border}` }}>
-              {["2st", "4st"].map(t => (
-                <button key={t} onClick={() => setEngineType(t)}
-                        className="font-mono uppercase tracking-wider px-3 py-1.5 transition"
-                        style={{
-                          background: engineType === t ? COLORS.accent : "transparent",
-                          color: engineType === t ? "#000" : COLORS.textDim,
-                          fontSize: 10,
-                        }}>
-                  {t}
-                </button>
-              ))}
-            </div>
-          </div>
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           {/* About */}
           <button onClick={() => setAboutOpen(true)}
                   className="font-mono text-[10px] uppercase tracking-wider px-2 py-1.5 transition hover:text-white"
@@ -785,19 +835,46 @@ const App = () => {
 
       {/* Empty / error state */}
       {!session && (
-        <main className="p-8 max-w-3xl mx-auto">
-          <div className="text-center py-16 scanlines relative" style={{ background: COLORS.panel, border: `1px dashed ${COLORS.border}` }}
+        <main className="p-4 sm:p-8 max-w-3xl mx-auto">
+          {/* What is this for? */}
+          <div className="mb-4 p-4 sm:p-5" style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}` }}>
+            <div className="font-mono text-[10px] uppercase tracking-[0.25em] mb-2" style={{ color: COLORS.accent }}>
+              ▸ このツールの目的
+            </div>
+            <div className="text-sm space-y-2" style={{ color: COLORS.textDim }}>
+              <p>aRacer ECU で走った後の <code className="font-mono text-xs px-1" style={{ background: COLORS.cell, color: COLORS.accent }}>.loga</code> ログを読み、<strong style={{ color: COLORS.text }}>実走時の AFR がどこで濃すぎ／薄すぎたかを特定する</strong>診断ツール。SpeedTuning で燃料マップを修正する前段階で使う。</p>
+              <div className="font-mono text-[11px] mt-3 px-3 py-2" style={{ background: COLORS.cell, color: COLORS.textMuted }}>
+                走行 → .loga 出力 → <span style={{ color: COLORS.accent }}>[ここで診断]</span> → SpeedTuning で修正 → 走行で検証
+              </div>
+            </div>
+          </div>
+
+          {/* How to use? */}
+          <div className="mb-4 p-4 sm:p-5" style={{ background: COLORS.panel, border: `1px solid ${COLORS.border}` }}>
+            <div className="font-mono text-[10px] uppercase tracking-[0.25em] mb-3" style={{ color: COLORS.accent }}>
+              ▸ 操作の流れ
+            </div>
+            <ol className="text-sm space-y-1.5 pl-1" style={{ color: COLORS.textDim }}>
+              <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>01</span>下のエリアに <code className="font-mono text-xs px-1" style={{ background: COLORS.cell, color: COLORS.accent }}>.loga</code> をドロップ、または ↑LOAD ボタンで開く</li>
+              <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>02</span>ヒートマップで <span style={{ color: COLORS.danger }}>赤いセル（リーン＝危険）</span>を最優先、続いて <span style={{ color: COLORS.cool }}>濃すぎる青</span>を探す</li>
+              <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>03</span>気になるセルをタップ／ホバーして RPM・TPS 帯域と AFR・サンプル数を確認</li>
+              <li><span className="font-mono text-[10px] mr-2" style={{ color: COLORS.accent }}>04</span>SpeedTuning 側で対応セルの燃料補正を調整</li>
+            </ol>
+          </div>
+
+          {/* Drop zone */}
+          <div className="text-center py-12 sm:py-14 scanlines relative" style={{ background: COLORS.panel, border: `1px dashed ${COLORS.border}` }}
                onDragOver={(e) => e.preventDefault()}
                onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files?.[0]) handleFile(e.dataTransfer.files[0]); }}>
             <div className="font-mono uppercase tracking-[0.3em] text-xs mb-3" style={{ color: COLORS.accent }}>
               READY · NO LOG LOADED
             </div>
-            <div className="text-sm mb-6" style={{ color: COLORS.textDim }}>
-              aRacer の <code className="font-mono text-xs px-1" style={{ background: COLORS.cell, color: COLORS.accent }}>.loga</code> ファイルをドラッグ＆ドロップ、または ↑LOAD ボタンで開く
+            <div className="text-sm mb-6 px-4" style={{ color: COLORS.textDim }}>
+              <code className="font-mono text-xs px-1" style={{ background: COLORS.cell, color: COLORS.accent }}>.loga</code> をドラッグ＆ドロップ、または ↑LOAD ボタンで開く
             </div>
             <div className="font-mono text-[10px] space-y-1" style={{ color: COLORS.textMuted }}>
               <div>SUPPORTED · aRacer App / ECU Memory / Logger Module</div>
-              <div>SP / ECU / LM</div>
+              <div>SP · ECU · LM</div>
             </div>
           </div>
           {parseError && (
@@ -810,7 +887,7 @@ const App = () => {
       )}
 
       {session && (
-        <main className="p-4 grid gap-3" style={{ gridTemplateColumns: "1fr 320px" }}>
+        <main className="p-3 sm:p-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
           {/* LEFT — main column */}
           <div className="space-y-3">
             {/* Session info */}
@@ -846,20 +923,20 @@ const App = () => {
             )}
 
             {/* Fuel map heatmap */}
-            <Panel title={`Fuel map · RPM × TPS × AFR  (engine: ${engineType.toUpperCase()})`} accent
+            <Panel title="Fuel map · RPM × TPS × AFR" accent
                    actions={
                      <div className="font-mono text-[10px]" style={{ color: COLORS.textMuted }}>
-                       target {AFR_TARGETS[engineType].low.toFixed(1)}–{AFR_TARGETS[engineType].high.toFixed(1)} (mid {AFR_TARGETS[engineType].mid.toFixed(1)})
+                       target {AFR_TARGET.low.toFixed(1)}–{AFR_TARGET.high.toFixed(1)} (mid {AFR_TARGET.mid.toFixed(1)})
                      </div>
                    }>
-              <FuelMapHeatmap cells={cells} engineType={engineType} rpmRange={rpmRange} tpsRange={tpsRange}
+              <FuelMapHeatmap cells={cells} rpmRange={rpmRange} tpsRange={tpsRange}
                               hoveredCell={hoveredCell} setHoveredCell={setHoveredCell} />
             </Panel>
 
             {/* Cell detail */}
             <Panel title="Cell detail" accent>
               <CellDetail hovered={hoveredCell} rpmRange={rpmRange} tpsRange={tpsRange}
-                          rpmBins={rpmBins} tpsBins={tpsBins} engineType={engineType} />
+                          rpmBins={rpmBins} tpsBins={tpsBins} />
             </Panel>
           </div>
 
@@ -871,7 +948,7 @@ const App = () => {
 
             <Panel title="AFR colour scale" accent>
               <div className="p-3">
-                <AfrLegend engineType={engineType} />
+                <AfrLegend />
               </div>
             </Panel>
 
