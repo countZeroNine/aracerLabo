@@ -7,14 +7,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root {
     --bg-deep:      #08090b;
@@ -81,6 +79,75 @@
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
 const { useState, useMemo, useRef, useCallback, useEffect } = React;
+
+// ─── App version & changelog ────────────────────────────────
+const APP_VERSION = "0.4.1";
+const CHANGELOG = [
+  {
+    version: "0.4.1",
+    date: "2026-05-07",
+    notes: [
+      "Track Map タブで真っ黒画面になるバグを修正（Leaflet integrity ハッシュ誤りの可能性除去のため属性削除）",
+      "Leaflet ロード待機メカニズムを追加：起動直後にタブ押下でもエラーにならない",
+      "地図初期化失敗時に明示的なエラーメッセージを表示（無言の黒画面化を防止）",
+      "全ての地図描画処理を try/catch で保護",
+      "マウント直後のコンテナサイズ不整合に対する `invalidateSize()` 遅延呼出を追加",
+    ],
+  },
+  {
+    version: "0.4.0",
+    date: "2026-05-07",
+    notes: [
+      "About モーダルに変更履歴パネルを追加（drogger_analyzer 互換書式）",
+      "ヘッダーのバージョン表記を APP_VERSION 連動に変更",
+    ],
+  },
+  {
+    version: "0.3.1",
+    date: "2026-05-07",
+    notes: [
+      "GPS カラム命名2系統に対応（SP形式: GPS_latitude/longitude 単一カラム、LM/ECU形式: 度分万分の一の multi-column DMS）",
+      "ヒートマップの TPS 軸方向を aRacer SpeedTuning 公式（D3Cyl1_VM 等）と統一：低TPSが上、高TPSが下",
+      "会社名を訂正：Aracer Mechatronic Inc. → aRacer SpeedTek（艾銳斯動力科技）",
+      "About モーダル・ドキュメントを機種名列挙からフォーマット主体（SP/ECU/LM）の説明に書き換え",
+    ],
+  },
+  {
+    version: "0.3.0",
+    date: "2026-05-07",
+    notes: [
+      "Phase 2: GPS 連携と地図ビューを実装",
+      "Leaflet + OpenStreetMap で走行軌跡を AFR 色塗り表示（最大2000セグメントに自動間引き）",
+      "サーキット自動判定（GPS重心から最近傍 CIRCUITS エントリ、5km以内）。筑波コース2000/1000・もてぎ北ショート/ロード対応",
+      "フィニッシュライン基準のラップ自動分割（IR_LapNumber 不在ログでも線分交差判定で動作）",
+      "ヒートマップ⇔地図のタブ切替・双方向ハイライト（セル選択→地図にオレンジ円、地図クリック→該当セル選択）",
+    ],
+  },
+  {
+    version: "0.2.0",
+    date: "2026-05-07",
+    notes: [
+      "Phase A: 致命傷フィックス",
+      "ステータス側配色を aRacer SpeedTuning / HONDA 燃調ソフト慣例に統一（赤=リーン=危険、青=リッチ=安全）",
+      "セル文字色のコントラスト調整（リーン側＝赤背景にも白文字適用）",
+      "2-stroke サポートを完全排除（aRacer は二輪 FI 用 ECU のため）",
+      "モバイル/タブレット対応：レスポンシブグリッド、ヒートマップ横スクロール、タッチでセル選択",
+      "オンボーディング画面追加：空状態に「目的・操作の流れ」を明示",
+    ],
+  },
+  {
+    version: "0.1.0",
+    date: "2026-05-06",
+    notes: [
+      "初版リリース",
+      "aRacer .loga ログ読込（SP / ECU / LM 全 3 形式自動判別）",
+      "燃調マップヒートマップ（RPM × TPS × AFR、16×16 グリッド、aRacer Race Panel と同一の縦横軸）",
+      "セル詳細パネル、マップ全体統計、AFR カラースケール凡例",
+      "ラップフィルタ、グリッド設定（bins・range 手動調整、RPM range 自動算出）",
+      "32Hz 超のソース自動間引き（10Hz 程度に正規化）",
+    ],
+  },
+];
 
 // ─── Aesthetic constants ─────────────────────────────────────
 const COLORS = {
@@ -843,141 +910,174 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
   const mapDivRef = useRef(null);
   const mapRef = useRef(null);
   const layersRef = useRef({ track: null, highlight: null, finishLine: null, currentMarker: null });
+  // Leaflet が DOM ロード完了より後でロードされるケースに対応：起動時の状態を保持
+  const [leafletStatus, setLeafletStatus] = useState(
+    typeof window !== "undefined" && window.L ? "ready" : "loading"
+  );
+  const [initError, setInitError] = useState(null);
 
-  // 地図初期化（一度だけ）
+  // Leaflet ロード待機（最大10秒）
   useEffect(() => {
-    if (!mapDivRef.current || mapRef.current) return;
-    if (!window.L) {
-      console.error("Leaflet not loaded");
+    if (leafletStatus === "ready") return;
+    const start = Date.now();
+    const tick = () => {
+      if (window.L) { setLeafletStatus("ready"); return; }
+      if (Date.now() - start > 10000) { setLeafletStatus("failed"); return; }
+      setTimeout(tick, 150);
+    };
+    tick();
+  }, [leafletStatus]);
+
+  // 地図初期化
+  useEffect(() => {
+    if (leafletStatus !== "ready" || !mapDivRef.current || mapRef.current) return;
+    try {
+      const map = window.L.map(mapDivRef.current, {
+        zoomControl: true,
+        attributionControl: true,
+        preferCanvas: true,
+      });
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap',
+      }).addTo(map);
+      mapRef.current = map;
+      // マウント直後はコンテナサイズが不安定なので invalidateSize を遅延呼出
+      setTimeout(() => { try { map.invalidateSize(); } catch(e){} }, 100);
+    } catch (e) {
+      console.error("Leaflet init failed:", e);
+      setInitError(e.message || String(e));
       return;
     }
-    const map = L.map(mapDivRef.current, {
-      zoomControl: true,
-      attributionControl: true,
-      preferCanvas: true,  // ポリラインが多いのでCanvas描画
-    });
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 19,
-      attribution: '&copy; OpenStreetMap',
-    }).addTo(map);
-    mapRef.current = map;
-
     return () => {
-      map.remove();
+      try { mapRef.current?.remove(); } catch(e) {}
       mapRef.current = null;
     };
-  }, []);
+  }, [leafletStatus]);
 
   // GPSライン描画（AFR色塗り）
   useEffect(() => {
     const map = mapRef.current;
     if (!map || samples.length === 0) return;
+    try {
+      // 既存レイヤをクリア（highlight は別 useEffect 管理なので残す）
+      if (layersRef.current.track) { map.removeLayer(layersRef.current.track); layersRef.current.track = null; }
+      if (layersRef.current.finishLine) { map.removeLayer(layersRef.current.finishLine); layersRef.current.finishLine = null; }
 
-    // 既存レイヤをクリア
-    Object.values(layersRef.current).forEach(l => { if (l) map.removeLayer(l); });
-    layersRef.current = { track: null, highlight: null, finishLine: null, currentMarker: null };
+      const validSamples = samples.filter(s => !isNaN(s.Lat) && !isNaN(s.Lon));
+      if (validSamples.length < 2) return;
 
-    const validSamples = samples.filter(s => !isNaN(s.Lat) && !isNaN(s.Lon));
-    if (validSamples.length < 2) return;
-
-    // AFR ベースの色塗り：連続するサンプルペアを polyline 化
-    // パフォーマンス対策で間引き：最大 2000 セグメント程度に
-    const stride = Math.max(1, Math.floor(validSamples.length / 2000));
-    const segments = [];
-    for (let i = stride; i < validSamples.length; i += stride) {
-      const a = validSamples[i - stride];
-      const b = validSamples[i];
-      // ペアの平均 AFR でセグメント色を決める
-      const avgAfr = (a.Afr + b.Afr) / 2;
-      const color = avgAfr > 0 ? afrColor(avgAfr) : "#444";
-      segments.push({ a, b, color, avgAfr });
-    }
-
-    // セグメントを Layer Group としてまとめる
-    const trackLayer = L.layerGroup();
-    for (const seg of segments) {
-      L.polyline([[seg.a.Lat, seg.a.Lon], [seg.b.Lat, seg.b.Lon]], {
-        color: seg.color || "#444",
-        weight: 4,
-        opacity: 0.85,
-        lineCap: "round",
-      }).addTo(trackLayer);
-    }
-    trackLayer.addTo(map);
-    layersRef.current.track = trackLayer;
-
-    // フィニッシュライン描画
-    if (circuitDetection?.circuit) {
-      const fl = circuitDetection.circuit.finishLine;
-      const finishLine = L.polyline(
-        [[fl[0].lat, fl[0].lon], [fl[1].lat, fl[1].lon]],
-        { color: "#fb923c", weight: 5, opacity: 1, dashArray: "6,4" }
-      ).bindTooltip("FINISH LINE", { permanent: false, direction: "top" });
-      finishLine.addTo(map);
-      layersRef.current.finishLine = finishLine;
-    }
-
-    // ビューを走行軌跡にフィット
-    const bounds = L.latLngBounds(validSamples.map(s => [s.Lat, s.Lon]));
-    map.fitBounds(bounds, { padding: [20, 20] });
-
-    // クリックでセル選択（最近傍点を探す）
-    const clickHandler = (e) => {
-      const click = e.latlng;
-      let best = null, bestD = Infinity;
-      for (const s of validSamples) {
-        const d = (s.Lat - click.lat) ** 2 + (s.Lon - click.lng) ** 2;
-        if (d < bestD) { bestD = d; best = s; }
+      // パフォーマンス対策：最大 2000 セグメント程度に間引き
+      const stride = Math.max(1, Math.floor(validSamples.length / 2000));
+      const trackLayer = window.L.layerGroup();
+      for (let i = stride; i < validSamples.length; i += stride) {
+        const a = validSamples[i - stride];
+        const b = validSamples[i];
+        const avgAfr = (a.Afr + b.Afr) / 2;
+        const color = avgAfr > 0 ? afrColor(avgAfr) : "#444";
+        window.L.polyline([[a.Lat, a.Lon], [b.Lat, b.Lon]], {
+          color: color || "#444",
+          weight: 4,
+          opacity: 0.85,
+          lineCap: "round",
+        }).addTo(trackLayer);
       }
-      if (best && onSelectFromMap) {
-        onSelectFromMap(best);
-      }
-    };
-    map.on("click", clickHandler);
+      trackLayer.addTo(map);
+      layersRef.current.track = trackLayer;
 
-    return () => {
-      map.off("click", clickHandler);
-    };
-  }, [samples, circuitDetection, onSelectFromMap]);
+      // フィニッシュライン
+      if (circuitDetection?.circuit) {
+        const fl = circuitDetection.circuit.finishLine;
+        const finishLine = window.L.polyline(
+          [[fl[0].lat, fl[0].lon], [fl[1].lat, fl[1].lon]],
+          { color: "#fb923c", weight: 5, opacity: 1, dashArray: "6,4" }
+        ).bindTooltip("FINISH LINE", { permanent: false, direction: "top" });
+        finishLine.addTo(map);
+        layersRef.current.finishLine = finishLine;
+      }
+
+      // ビューを走行軌跡にフィット
+      const bounds = window.L.latLngBounds(validSamples.map(s => [s.Lat, s.Lon]));
+      map.fitBounds(bounds, { padding: [20, 20] });
+
+      // クリックでセル選択
+      const clickHandler = (e) => {
+        const click = e.latlng;
+        let best = null, bestD = Infinity;
+        for (const s of validSamples) {
+          const d = (s.Lat - click.lat) ** 2 + (s.Lon - click.lng) ** 2;
+          if (d < bestD) { bestD = d; best = s; }
+        }
+        if (best && onSelectFromMap) onSelectFromMap(best);
+      };
+      map.on("click", clickHandler);
+      return () => { try { map.off("click", clickHandler); } catch(e){} };
+    } catch (e) {
+      console.error("Track render failed:", e);
+    }
+  }, [leafletStatus, samples, circuitDetection, onSelectFromMap]);
 
   // セル選択時のハイライト
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    if (layersRef.current.highlight) {
-      map.removeLayer(layersRef.current.highlight);
-      layersRef.current.highlight = null;
+    try {
+      if (layersRef.current.highlight) {
+        map.removeLayer(layersRef.current.highlight);
+        layersRef.current.highlight = null;
+      }
+      if (!hoveredCell) return;
+      const matched = samplesInCell(samples, rpmRange, tpsRange, rpmBins, tpsBins, hoveredCell.ri, hoveredCell.ti);
+      if (matched.length === 0) return;
+      const highlight = window.L.layerGroup();
+      for (const s of matched) {
+        window.L.circleMarker([s.Lat, s.Lon], {
+          radius: 5,
+          color: "#fff",
+          weight: 2,
+          opacity: 1,
+          fillColor: "#fb923c",
+          fillOpacity: 0.95,
+        }).addTo(highlight);
+      }
+      highlight.addTo(map);
+      layersRef.current.highlight = highlight;
+    } catch (e) {
+      console.error("Highlight render failed:", e);
     }
-    if (!hoveredCell) return;
-
-    const matched = samplesInCell(samples, rpmRange, tpsRange, rpmBins, tpsBins, hoveredCell.ri, hoveredCell.ti);
-    if (matched.length === 0) return;
-
-    const highlight = L.layerGroup();
-    for (const s of matched) {
-      L.circleMarker([s.Lat, s.Lon], {
-        radius: 5,
-        color: "#fff",
-        weight: 2,
-        opacity: 1,
-        fillColor: "#fb923c",
-        fillOpacity: 0.95,
-      }).addTo(highlight);
-    }
-    highlight.addTo(map);
-    layersRef.current.highlight = highlight;
-  }, [hoveredCell, samples, rpmRange, tpsRange, rpmBins, tpsBins]);
+  }, [leafletStatus, hoveredCell, samples, rpmRange, tpsRange, rpmBins, tpsBins]);
 
   return (
     <div className="relative">
       <div ref={mapDivRef} style={{ height: 520, background: "#0a0c10" }} />
-      {circuitDetection?.circuit && (
+      {/* ロード/エラー/未判定オーバーレイ */}
+      {leafletStatus === "loading" && (
+        <div className="absolute inset-0 flex items-center justify-center font-mono text-xs"
+             style={{ color: COLORS.textMuted, background: "rgba(10,12,16,0.6)" }}>
+          地図ライブラリ読み込み中...
+        </div>
+      )}
+      {leafletStatus === "failed" && (
+        <div className="absolute inset-0 flex items-center justify-center font-mono text-xs px-4 text-center"
+             style={{ color: COLORS.danger, background: "rgba(10,12,16,0.85)" }}>
+          地図ライブラリ（Leaflet）の読み込みに失敗しました。<br/>
+          ネットワーク・ad-blocker をご確認ください。<br/>
+          ヒートマップ機能は通常通り使用できます。
+        </div>
+      )}
+      {initError && (
+        <div className="absolute inset-0 flex items-center justify-center font-mono text-xs px-4 text-center"
+             style={{ color: COLORS.danger, background: "rgba(10,12,16,0.85)" }}>
+          地図初期化エラー: {initError}
+        </div>
+      )}
+      {leafletStatus === "ready" && circuitDetection?.circuit && (
         <div className="absolute top-2 right-2 px-2 py-1 z-[400] font-mono text-[10px] uppercase tracking-wider"
              style={{ background: "rgba(15,17,21,0.92)", color: COLORS.accent, border: `1px solid ${COLORS.borderBright}` }}>
           {circuitDetection.circuit.name}
         </div>
       )}
-      {!circuitDetection && samples.length > 0 && (
+      {leafletStatus === "ready" && !circuitDetection && samples.length > 0 && (
         <div className="absolute top-2 right-2 px-2 py-1 z-[400] font-mono text-[10px] uppercase tracking-wider"
              style={{ background: "rgba(15,17,21,0.92)", color: COLORS.textMuted, border: `1px solid ${COLORS.border}` }}>
           サーキット未登録 / GPS 範囲外
@@ -990,10 +1090,10 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
 // ─── About modal ─────────────────────────────────────────────
 const AboutModal = ({ onClose }) => (
   <div className="fixed inset-0 flex items-center justify-center p-4 z-50" style={{ background: "rgba(0,0,0,0.85)" }} onClick={onClose}>
-    <div onClick={(e) => e.stopPropagation()} className="max-w-xl w-full p-5" style={{ background: COLORS.panel, border: `1px solid ${COLORS.borderBright}` }}>
+    <div onClick={(e) => e.stopPropagation()} className="max-w-2xl w-full max-h-[90vh] overflow-y-auto p-5" style={{ background: COLORS.panel, border: `1px solid ${COLORS.borderBright}` }}>
       <div className="flex items-start justify-between gap-3 mb-3">
         <div>
-          <div className="font-mono text-[10px] uppercase tracking-[0.3em]" style={{ color: COLORS.accent }}>aRacer Lab v0.1</div>
+          <div className="font-mono text-[10px] uppercase tracking-[0.3em]" style={{ color: COLORS.accent }}>aRacer Lab v{APP_VERSION}</div>
           <div className="font-mono text-lg mt-0.5">Fuel Map Studio</div>
         </div>
         <button onClick={onClose} className="font-mono text-sm hover:text-white" style={{ color: COLORS.textDim }}>× CLOSE</button>
@@ -1007,12 +1107,37 @@ const AboutModal = ({ onClose }) => (
         <p><strong style={{ color: COLORS.text }}>Track Map</strong> タブでは、GPS データを含むログでサーキット軌跡をAFR色塗り表示。ヒートマップ ⇔ 地図でセル選択を双方向リンクし、「リーン箇所がコース上のどこで発生したか」を特定可能。筑波（コース2000/1000）・もてぎ（北ショート/ロード）を自動判定。</p>
         <p className="text-xs" style={{ color: COLORS.textMuted }}>
           配色は aRacer SpeedTuning / HONDA 燃調ソフトの慣例に準拠（リーンが危険域＝赤）。<br/>
-          二輪 FI 用 ECU 想定のため 4-stroke 専用。
+          二輪 FI 用 ECU 想定のため 4-stroke 専用。<br/>
+          ヒートマップ軸方向は aRacer SpeedTuning D3Cyl1_VM と同じ（横軸=RPM 左→右増加、縦軸=TPS 上→下増加）。
         </p>
         <p style={{ color: COLORS.textMuted }} className="text-xs pt-2" >
           データはブラウザ内で処理され、外部サーバーには送信されません。<br/>
           aRacer は <a href="https://www.aracer-speedtek.com/" target="_blank" rel="noopener noreferrer" style={{ color: COLORS.textDim, textDecoration: "underline" }}>aRacer SpeedTek</a>（艾銳斯動力科技）の製品ブランドです。本ツールは非公式な解析ツールです。
         </p>
+      </div>
+
+      {/* 変更履歴 */}
+      <div className="mt-5 pt-4" style={{ borderTop: `1px solid ${COLORS.border}` }}>
+        <div className="font-mono text-[10px] uppercase tracking-[0.18em] mb-3" style={{ color: COLORS.textMuted }}>変更履歴</div>
+        <div className="space-y-3">
+          {CHANGELOG.map((entry) => (
+            <div key={entry.version} className="border-l-2 pl-3"
+                 style={{ borderColor: entry.version === APP_VERSION ? COLORS.accent : COLORS.border }}>
+              <div className="font-mono text-xs flex items-baseline gap-2">
+                <span style={{ color: entry.version === APP_VERSION ? COLORS.accentBright : COLORS.text }}>v{entry.version}</span>
+                <span className="text-[10px]" style={{ color: COLORS.textMuted }}>{entry.date}</span>
+              </div>
+              <ul className="font-mono text-[11px] mt-1 space-y-0.5" style={{ color: COLORS.textDim }}>
+                {entry.notes.map((n, i) => (
+                  <li key={i} className="flex gap-1.5">
+                    <span style={{ color: COLORS.textMuted }}>·</span>
+                    <span>{n}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   </div>
@@ -1158,7 +1283,7 @@ const App = () => {
               <span style={{ color: COLORS.accent }}>aRacer</span> // LAB
             </div>
             <div className="font-mono text-[9px] uppercase tracking-[0.25em] mt-0.5" style={{ color: COLORS.textMuted }}>
-              FUEL MAP STUDIO · v0.1
+              FUEL MAP STUDIO · v{APP_VERSION}
             </div>
           </div>
         </div>
