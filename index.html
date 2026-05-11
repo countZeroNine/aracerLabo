@@ -81,8 +81,23 @@
 const { useState, useMemo, useRef, useCallback, useEffect } = React;
 
 // ─── App version & changelog ────────────────────────────────
-const APP_VERSION = "0.4.5";
+const APP_VERSION = "0.4.6";
 const CHANGELOG = [
+  {
+    version: "0.4.6",
+    date: "2026-05-11",
+    notes: [
+      "新機能: Track Map にリーンスポット重ね表示モード（View パネル右上の「☐ リーンスポット」トグル）",
+      "判定条件は別スレ実走分析で確立された定義をベースに、3段階の重要度で色分け：",
+      "  注意（黄丸） = AFR 14.7–16.5 / TPS≥30% / RPM≥4,000",
+      "  警戒（橙丸） = AFR 16.5–18.0 / TPS≥30% / RPM≥4,000",
+      "  危険（赤丸） = AFR ≥18.0 / RPM≥4,000（TPS gate なし、エンブレ中の致命的リーンも捕捉）",
+      "View パネル右上に各重要度のカウントを色付き表示（危/警/注）。コース上のどこで何回起きているかを一目で把握",
+      "マーカー数の上限は 500 点（重要度の高い方から優先描画）。LM 32Hz × 30分でも軽量に描画",
+      "各マーカーにツールチップで AFR / RPM / TPS の正確値を表示",
+      "ライン色塗りは維持。マーカーは上に重ねるオーバーレイ方式 = どの強度モードでも併用可能",
+    ],
+  },
   {
     version: "0.4.5",
     date: "2026-05-11",
@@ -327,6 +342,37 @@ const devColor = (dev) => {
   }
   const c = stops[stops.length-1].color;
   return `hsl(${c[0]}, ${c[1]}%, ${c[2]}%)`;
+};
+
+// ─── Lean spot detection (Track Map にコース上の危険箇所を可視化) ───
+// 別スレの実走分析で確立された定義をベース：
+//   注意・警戒は TPS≥30% / RPM≥4000 でアクセル開いている時の燃調不足を検出
+//   危険（AFR≥18.0、センサ振り切れ）は TPS gate なし → エンブレ中の致命的リーンもキャッチ
+const LEAN_SPOT_THRESHOLDS = {
+  caution:  { afrMin: 14.7, afrMax: 16.5, tpsMin: 30, rpmMin: 4000, color: "#eab308", radius: 4, label: "注意"  },
+  warning:  { afrMin: 16.5, afrMax: 18.0, tpsMin: 30, rpmMin: 4000, color: "#f97316", radius: 5, label: "警戒"  },
+  danger:   { afrMin: 18.0, afrMax: 99.0, tpsMin:  0, rpmMin: 4000, color: "#ef4444", radius: 6, label: "危険"  },
+};
+const LEAN_SPOT_MAX_MARKERS = 500;
+
+const computeLeanSpots = (samples) => {
+  if (!samples?.length) return { caution: [], warning: [], danger: [], total: 0 };
+  const out = { caution: [], warning: [], danger: [], total: 0 };
+  for (const s of samples) {
+    if (!Number.isFinite(s.Lat) || !Number.isFinite(s.Lon)) continue;
+    if (!s.Afr || s.Afr < 14.7) continue;
+    if (!s.Rpm || s.Rpm < 4000) continue;
+    // 強度判定（高い方から優先評価）
+    if (s.Afr >= LEAN_SPOT_THRESHOLDS.danger.afrMin) {
+      out.danger.push({ lat: s.Lat, lon: s.Lon, afr: s.Afr, rpm: s.Rpm, tps: s.Tps, time: s.RunTime });
+    } else if (s.Afr >= LEAN_SPOT_THRESHOLDS.warning.afrMin && s.Tps >= LEAN_SPOT_THRESHOLDS.warning.tpsMin) {
+      out.warning.push({ lat: s.Lat, lon: s.Lon, afr: s.Afr, rpm: s.Rpm, tps: s.Tps, time: s.RunTime });
+    } else if (s.Afr >= LEAN_SPOT_THRESHOLDS.caution.afrMin && s.Tps >= LEAN_SPOT_THRESHOLDS.caution.tpsMin) {
+      out.caution.push({ lat: s.Lat, lon: s.Lon, afr: s.Afr, rpm: s.Rpm, tps: s.Tps, time: s.RunTime });
+    }
+  }
+  out.total = out.caution.length + out.warning.length + out.danger.length;
+  return out;
 };
 
 // ─── aRacer .loga parser (copied from drogger_analyzer) ──────
@@ -1073,7 +1119,7 @@ const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
 };
 
 // ─── Track View (Phase 2: GPS 位置 × AFR の地図) ─────────────
-const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange, rpmBins, tpsBins, onSelectFromMap, colorMode = "afr" }) => {
+const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange, rpmBins, tpsBins, onSelectFromMap, colorMode = "afr", leanSpots = null, showLeanSpots = false }) => {
   const mapDivRef = useRef(null);
   const mapRef = useRef(null);
   const layersRef = useRef({ track: null, highlight: null, finishLine: null, currentMarker: null });
@@ -1250,6 +1296,52 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
     }
   }, [leafletStatus, samples, circuitDetection, onSelectFromMap, colorMode]);
 
+  // リーンスポット描画（toggle ON 時のみ）
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    try {
+      // 既存のリーンスポット層を一旦クリア
+      if (layersRef.current.leanSpots) {
+        for (const m of layersRef.current.leanSpots) {
+          try { map.removeLayer(m); } catch(e) {}
+        }
+        layersRef.current.leanSpots = null;
+      }
+      if (!showLeanSpots || !leanSpots || leanSpots.total === 0) return;
+
+      // 重要度順（danger > warning > caution）で上限 500 点まで描画
+      const ordered = [
+        ...leanSpots.danger.map(s => ({...s, level: "danger"})),
+        ...leanSpots.warning.map(s => ({...s, level: "warning"})),
+        ...leanSpots.caution.map(s => ({...s, level: "caution"})),
+      ];
+      const capped = ordered.slice(0, LEAN_SPOT_MAX_MARKERS);
+
+      const markers = [];
+      for (const s of capped) {
+        const cfg = LEAN_SPOT_THRESHOLDS[s.level];
+        const m = window.L.circleMarker([s.lat, s.lon], {
+          radius: cfg.radius,
+          color: "#000",
+          weight: 1,
+          opacity: 0.85,
+          fillColor: cfg.color,
+          fillOpacity: 0.92,
+        }).bindTooltip(
+          `${cfg.label} · AFR ${s.afr.toFixed(1)} · RPM ${Math.round(s.rpm)} · TPS ${Math.round(s.tps)}%`,
+          { direction: "top", offset: [0, -2] }
+        );
+        m.addTo(map);
+        markers.push(m);
+      }
+      layersRef.current.leanSpots = markers;
+      console.log("[aRacer Lab] lean spots rendered: " + markers.length + " / " + leanSpots.total + " (danger=" + leanSpots.danger.length + " warning=" + leanSpots.warning.length + " caution=" + leanSpots.caution.length + ")");
+    } catch (e) {
+      console.error("[aRacer Lab] Lean spot render failed:", e);
+    }
+  }, [leafletStatus, showLeanSpots, leanSpots]);
+
   // セル選択時のハイライト
   useEffect(() => {
     const map = mapRef.current;
@@ -1366,6 +1458,14 @@ const AboutModal = ({ onClose }) => (
           </ul>
           偏差モードは ECU が狙う目標自体が RPM/TPS で変動するため、AFR モードで見過ごしがちな「目標が 13.0 のところで実測 13.5（薄い）」のような状態を一目で発見できます。公式 SpeedTuning には存在しない aracer_lab オリジナルの分析モード。
         </p>
+        <p><strong style={{ color: COLORS.text }}>リーンスポット表示（v0.4.6〜）</strong>：View パネル右上の「☐ リーンスポット」で ON にすると、Track Map に**危険レベルの薄さを記録した地点に色丸**が打たれます。3段階の重要度：
+          <ul className="ml-4 mt-1 list-disc text-xs">
+            <li><span style={{ color: "#eab308" }}>● 注意</span>：AFR 14.7–16.5、TPS≥30%、RPM≥4,000</li>
+            <li><span style={{ color: "#f97316" }}>● 警戒</span>：AFR 16.5–18.0、TPS≥30%、RPM≥4,000</li>
+            <li><span style={{ color: "#ef4444" }}>● 危険</span>：AFR ≥18.0、RPM≥4,000（TPS gate なし、エンジンブレーキ中の致命的リーンも捕捉）</li>
+          </ul>
+          各マーカーに AFR/RPM/TPS の正確値ツールチップ。コース上のどこで集中しているかを見れば「ブレーキング・コーナー進入・全開区間」のどこに問題が偏っているかが明確になります。
+        </p>
         <p className="text-xs" style={{ color: COLORS.textMuted }}>
           配色は aRacer SpeedTuning / HONDA 燃調ソフトの慣例に準拠（リーンが危険域＝赤）。<br/>
           二輪 FI 用 ECU 想定のため 4-stroke 専用。<br/>
@@ -1418,6 +1518,7 @@ const App = () => {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [viewMode, setViewMode] = useState("heatmap"); // "heatmap" | "track"
   const [colorMode, setColorMode] = useState("afr"); // "afr"（実測値） | "dev"（WBO2-Target 偏差）
+  const [showLeanSpots, setShowLeanSpots] = useState(false); // Track Map にリーンスポット赤丸を重ね表示
   const fileInputRef = useRef(null);
 
   // Auto-adjust RPM range when a new file is loaded
@@ -1510,6 +1611,9 @@ const App = () => {
   }, [filteredSamples, rpmBins, tpsBins, rpmRange, tpsRange]);
 
   const stats = useMemo(() => computeMapStats(cells), [cells]);
+
+  // リーンスポット集計（Track Map に重ね表示・count バッジで使用）
+  const leanSpots = useMemo(() => computeLeanSpots(filteredSamples), [filteredSamples]);
 
   // 地図クリック → 該当セルをヒートマップ側でハイライト
   const handleSelectFromMap = useCallback((sample) => {
@@ -1681,6 +1785,22 @@ const App = () => {
                                    textDecoration: colorMode === "dev" ? "underline" : "none",
                                  }}>偏差</button>
                        </div>
+                       {/* Lean spot toggle (Track Map のみ視覚的に有効) */}
+                       {session.hasValidGps && (
+                         <label className="flex items-center gap-1 cursor-pointer select-none" style={{ color: COLORS.textMuted }}>
+                           <input type="checkbox" checked={showLeanSpots}
+                                  onChange={(e) => setShowLeanSpots(e.target.checked)}
+                                  style={{ accentColor: COLORS.danger }} />
+                           <span>リーンスポット</span>
+                           {showLeanSpots && leanSpots.total > 0 && (
+                             <span className="ml-1">
+                               (<span style={{ color: "#ef4444" }}>危{leanSpots.danger.length}</span>
+                               {" "}<span style={{ color: "#f97316" }}>警{leanSpots.warning.length}</span>
+                               {" "}<span style={{ color: "#eab308" }}>注{leanSpots.caution.length}</span>)
+                             </span>
+                           )}
+                         </label>
+                       )}
                        <div style={{ color: COLORS.textMuted }}>
                          {viewMode === "heatmap"
                            ? (colorMode === "afr"
@@ -1726,7 +1846,9 @@ const App = () => {
                            rpmRange={rpmRange} tpsRange={tpsRange}
                            rpmBins={rpmBins} tpsBins={tpsBins}
                            onSelectFromMap={handleSelectFromMap}
-                           colorMode={colorMode} />
+                           colorMode={colorMode}
+                           leanSpots={leanSpots}
+                           showLeanSpots={showLeanSpots} />
               )}
             </Panel>
 
