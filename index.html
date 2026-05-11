@@ -81,8 +81,22 @@
 const { useState, useMemo, useRef, useCallback, useEffect } = React;
 
 // ─── App version & changelog ────────────────────────────────
-const APP_VERSION = "0.4.4";
+const APP_VERSION = "0.4.5";
 const CHANGELOG = [
+  {
+    version: "0.4.5",
+    date: "2026-05-11",
+    notes: [
+      "新機能: 「色: AFR / 偏差」モード切替（View パネル右上）",
+      "偏差モード = WBO2 実測 − Target AFR を直接可視化。0 = ターゲット合致（緑）、+ = リーン（赤・危険）、− = リッチ（青・安全側）",
+      "偏差モードは Heatmap と Track Map の両方に適用：セル色塗りと走行ライン色塗りが連動して切り替わる",
+      "偏差モード時はセル表示値も切替（例: `+0.85` / `−0.30`）。`n=` はターゲット併記サンプル数を表示",
+      "凡例パネル（右サイド）も colorMode 連動：偏差モード時は −3 〜 +3 のスケールに切替、タイトルも「Deviation colour scale」に",
+      "パーサ拡張: `AfrTarget` フィールドを新規追加（AFR カラム = ECU が狙う値）。既存の `Afr` は AFR_WBO2_CAL 優先のまま（後方互換）",
+      "実データ検証: 5/10 もてぎ北ショート Run 1 LM版（30分57秒・59,429サンプル）で WBO2−Target 偏差を再現確認。中回転 +1.5〜+2.0 のリーン傾向が偏差モードで一目で可視化される",
+      "公式 SpeedTuning には偏差直視 UI が存在しないため、aracer_lab オリジナルの差別化機能",
+    ],
+  },
   {
     version: "0.4.4",
     date: "2026-05-07",
@@ -279,6 +293,42 @@ const afrColor = (afr) => {
   return `hsl(0, 80%, 50%)`;
 };
 
+// ─── Deviation color: WBO2 - Target ─────────────────────────
+// 0 = green (perfectly hitting target), + = warm (lean / danger), - = cool (rich / safe)
+// 表示範囲は ±3 を上限の目安に。aRacer SpeedTuning の AFR Cal. 系慣例（リーン=危険=赤）に合わせる
+const DEV_DISPLAY_MIN = -3.0;
+const DEV_DISPLAY_MAX = +3.0;
+const devColor = (dev) => {
+  if (!Number.isFinite(dev)) return null;
+  const stops = [
+    { dev: DEV_DISPLAY_MIN, color: [220, 80, 50] },   // deep blue (>3 rich)
+    { dev: -2.0,            color: [200, 75, 50] },   // blue
+    { dev: -1.0,            color: [180, 70, 48] },   // teal
+    { dev: -0.3,            color: [140, 70, 45] },   // green-teal
+    { dev:  0.0,            color: [120, 80, 45] },   // green (target)
+    { dev: +0.3,            color: [ 80, 75, 48] },   // yellow-green
+    { dev: +1.0,            color: [ 50, 85, 52] },   // yellow
+    { dev: +2.0,            color: [ 25, 85, 52] },   // orange
+    { dev: DEV_DISPLAY_MAX, color: [  0, 80, 48] },   // deep red (>3 lean)
+  ];
+  if (dev <= stops[0].dev) {
+    const c = stops[0].color;
+    return `hsl(${c[0]}, ${c[1]}%, ${c[2]}%)`;
+  }
+  for (let i = 1; i < stops.length; i++) {
+    if (dev <= stops[i].dev) {
+      const a = stops[i-1], b = stops[i];
+      const f = (dev - a.dev) / (b.dev - a.dev || 1);
+      const h = a.color[0] + (b.color[0] - a.color[0]) * f;
+      const s = a.color[1] + (b.color[1] - a.color[1]) * f;
+      const l = a.color[2] + (b.color[2] - a.color[2]) * f;
+      return `hsl(${h}, ${s}%, ${l}%)`;
+    }
+  }
+  const c = stops[stops.length-1].color;
+  return `hsl(${c[0]}, ${c[1]}%, ${c[2]}%)`;
+};
+
 // ─── aRacer .loga parser (copied from drogger_analyzer) ──────
 const detectLogFormat = (text) => {
   const firstLine = text.split("\n", 1)[0].trim();
@@ -311,7 +361,8 @@ const parseAracerLog = (text, format) => {
   const idx = {
     Rpm:          findIdx("rpm"),
     Speed:        findIdx("vehicle_speed_filtered", "vehicle_speed", "gps_speed"),
-    Afr:          findIdx("afr_wbo2_cal", "afr"),
+    Afr:          findIdx("afr_wbo2_cal", "afr"),  // 実測（WBO2 優先・AFR フォールバック）
+    AfrTarget:    findIdx("afr"),                   // ターゲット AFR（ECU が狙う値、偏差分析用）
     AfrAlt:       findIdx("af1_afr"),
     NbO2Volt:     findIdx("nbo2_volt"),
     Tps:          findIdx("tps_percent"),
@@ -399,6 +450,7 @@ const parseAracerLog = (text, format) => {
       Rpm:         num(idx.Rpm),
       Speed:       num(idx.Speed),
       Afr:         num(idx.Afr),
+      AfrTarget:   num(idx.AfrTarget),
       AfrAlt:      num(idx.AfrAlt),
       NbO2Volt:    num(idx.NbO2Volt),
       Tps:         num(idx.Tps),
@@ -512,7 +564,7 @@ const computeFuelMapCells = (samples, rpmBins, tpsBins, rpmRange, tpsRange) => {
   const cells = [];
   for (let t = 0; t < tpsBins; t++) {
     const row = [];
-    for (let r = 0; r < rpmBins; r++) row.push({ afrs: [], count: 0 });
+    for (let r = 0; r < rpmBins; r++) row.push({ afrs: [], devs: [], count: 0 });
     cells.push(row);
   }
   const rpmStep = (rpmRange[1] - rpmRange[0]) / rpmBins;
@@ -526,6 +578,10 @@ const computeFuelMapCells = (samples, rpmBins, tpsBins, rpmRange, tpsRange) => {
     const ti = Math.min(tpsBins - 1, Math.floor((s.Tps - tpsRange[0]) / tpsStep));
     cells[ti][ri].afrs.push(s.Afr);
     cells[ti][ri].count++;
+    // 偏差サンプル：AfrTarget が有効値（5〜25 範囲内）の時のみ
+    if (s.AfrTarget && s.AfrTarget > 5 && s.AfrTarget < 25) {
+      cells[ti][ri].devs.push(s.Afr - s.AfrTarget);
+    }
   }
 
   // Per-cell statistics
@@ -538,6 +594,17 @@ const computeFuelMapCells = (samples, rpmBins, tpsBins, rpmRange, tpsRange) => {
       cell.maxAfr = cell.afrs[cell.afrs.length - 1];
       const sum = cell.afrs.reduce((a, b) => a + b, 0);
       cell.meanAfr = sum / cell.afrs.length;
+      // 偏差統計（target が取れているサンプルのみ集計）
+      if (cell.devs.length > 0) {
+        const devsSorted = [...cell.devs].sort((a, b) => a - b);
+        cell.medianDev = devsSorted[Math.floor(devsSorted.length / 2)];
+        cell.meanDev = cell.devs.reduce((a, b) => a + b, 0) / cell.devs.length;
+        cell.devCount = cell.devs.length;
+      } else {
+        cell.medianDev = null;
+        cell.meanDev = null;
+        cell.devCount = 0;
+      }
     }
   }
   return cells;
@@ -613,7 +680,7 @@ const Stat = ({ label, value, unit, color }) => (
 );
 
 // ─── Fuel map heatmap (the centerpiece) ──────────────────────
-const FuelMapHeatmap = ({ cells, rpmRange, tpsRange, hoveredCell, setHoveredCell }) => {
+const FuelMapHeatmap = ({ cells, rpmRange, tpsRange, hoveredCell, setHoveredCell, colorMode = "afr" }) => {
   const tpsBins = cells.length;
   const rpmBins = cells[0]?.length || 0;
   if (!rpmBins) return null;
@@ -632,9 +699,29 @@ const FuelMapHeatmap = ({ cells, rpmRange, tpsRange, hoveredCell, setHoveredCell
     const x = padL + ri * cellW;
     const y = padT + ti * cellH;
     const isHover = hoveredCell && hoveredCell.ri === ri && hoveredCell.ti === ti;
-    const fill = cell.count > 0 ? afrColor(cell.medianAfr) : COLORS.cell;
-    // 文字色：リッチ側(青背景)とリーン側(赤背景)はどちらも暗いので白、中央(緑〜黄)は黒
-    const useLightText = cell.count > 0 && (cell.medianAfr < 11.5 || cell.medianAfr > 15.5);
+
+    // 表示モードで色塗りと値表示を分岐
+    let fill, displayVal, useLightText, hasData;
+    if (colorMode === "dev") {
+      hasData = cell.count > 0 && cell.devCount > 0 && cell.medianDev !== null;
+      if (hasData) {
+        fill = devColor(cell.medianDev);
+        // 偏差は ±0.3 帯外で背景が濃くなるので、その範囲で白文字
+        useLightText = Math.abs(cell.medianDev) > 1.2;
+        displayVal = (cell.medianDev >= 0 ? "+" : "") + cell.medianDev.toFixed(2);
+      } else {
+        fill = COLORS.cell;
+      }
+    } else {
+      hasData = cell.count > 0;
+      if (hasData) {
+        fill = afrColor(cell.medianAfr);
+        useLightText = cell.medianAfr < 11.5 || cell.medianAfr > 15.5;
+        displayVal = cell.medianAfr.toFixed(1);
+      } else {
+        fill = COLORS.cell;
+      }
+    }
 
     return (
       <g key={`${ri}-${ti}`}
@@ -645,21 +732,21 @@ const FuelMapHeatmap = ({ cells, rpmRange, tpsRange, hoveredCell, setHoveredCell
               fill={fill} stroke={isHover ? "var(--accent-bright)" : "#0a0a0d"}
               strokeWidth={isHover ? 2 : 0.5}
               className={isHover ? "cell-hot" : ""} />
-        {cell.count > 0 && (
+        {hasData && (
           <>
             <text x={x + cellW / 2} y={y + cellH / 2 - 1}
                   textAnchor="middle" dominantBaseline="central"
                   fontSize={11} fontFamily="JetBrains Mono" fontWeight={600}
                   fill={useLightText ? "#fff" : "rgba(0,0,0,0.85)"}
                   pointerEvents="none">
-              {cell.medianAfr.toFixed(1)}
+              {displayVal}
             </text>
             <text x={x + cellW / 2} y={y + cellH / 2 + 9}
                   textAnchor="middle"
                   fontSize={7} fontFamily="JetBrains Mono"
                   fill={useLightText ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.55)"}
                   pointerEvents="none">
-              n={cell.count}
+              n={colorMode === "dev" ? cell.devCount : cell.count}
             </text>
           </>
         )}
@@ -721,11 +808,57 @@ const FuelMapHeatmap = ({ cells, rpmRange, tpsRange, hoveredCell, setHoveredCell
   );
 };
 
-// ─── AFR colour legend with target band overlay ──────────────
-const AfrLegend = () => {
-  const target = AFR_TARGET;
+// ─── Colour legend with target band overlay (AFR / Dev) ──────
+const AfrLegend = ({ colorMode = "afr" }) => {
   const w = 320, h = 50;
   const stops = 60;
+
+  if (colorMode === "dev") {
+    // 偏差モード: -3 〜 +3 のスケール、0 が target
+    const devMin = DEV_DISPLAY_MIN, devMax = DEV_DISPLAY_MAX;
+    const steps = [];
+    for (let i = 0; i < stops; i++) {
+      const t = i / (stops - 1);
+      const dev = devMin + t * (devMax - devMin);
+      steps.push({ x: (i * w) / stops, color: devColor(dev) });
+    }
+    const devX = (d) => ((d - devMin) / (devMax - devMin)) * w;
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ maxWidth: 360 }}>
+        {steps.map((s, i) => (
+          <rect key={i} x={s.x} y={6} width={w / stops + 0.5} height={14} fill={s.color} />
+        ))}
+        {/* 0 = target line */}
+        <line x1={devX(0)} y1={3} x2={devX(0)} y2={23}
+              stroke={COLORS.accentBright} strokeWidth={1.5} />
+        {/* Tick labels */}
+        {[-3, -2, -1, 0, 1, 2, 3].map((dev) => (
+          <g key={dev}>
+            <line x1={devX(dev)} y1={20} x2={devX(dev)} y2={26} stroke={COLORS.textMuted} strokeWidth={0.5} />
+            <text x={devX(dev)} y={36} textAnchor="middle" fontSize={9} fontFamily="JetBrains Mono" fill={COLORS.textDim}>
+              {dev > 0 ? `+${dev}` : `${dev}`}
+            </text>
+          </g>
+        ))}
+        {/* Direction hints: rich(safe) ← target → lean(danger) */}
+        <text x={devX(-2)} y={48} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono"
+              fill={COLORS.cool} letterSpacing="0.1em">
+          ← RICH (safe)
+        </text>
+        <text x={devX(0)} y={48} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono"
+              fill={COLORS.accent} letterSpacing="0.15em">
+          TARGET
+        </text>
+        <text x={devX(2)} y={48} textAnchor="middle" fontSize={8} fontFamily="JetBrains Mono"
+              fill={COLORS.danger} letterSpacing="0.1em">
+          LEAN (danger) →
+        </text>
+      </svg>
+    );
+  }
+
+  // AFR モード（既定）
+  const target = AFR_TARGET;
   const steps = [];
   for (let i = 0; i < stops; i++) {
     const t = i / (stops - 1);
@@ -940,7 +1073,7 @@ const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
 };
 
 // ─── Track View (Phase 2: GPS 位置 × AFR の地図) ─────────────
-const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange, rpmBins, tpsBins, onSelectFromMap }) => {
+const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange, rpmBins, tpsBins, onSelectFromMap, colorMode = "afr" }) => {
   const mapDivRef = useRef(null);
   const mapRef = useRef(null);
   const layersRef = useRef({ track: null, highlight: null, finishLine: null, currentMarker: null });
@@ -1031,19 +1164,36 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
         allLayers.push(baseLine);
       }
 
-      // 2) AFR 色塗りセグメント（無効AFRは灰色で必ず描く）
+      // 2) AFR / 偏差 の色塗りセグメント（無効AFRは灰色で必ず描く）
       let afrColored = 0, gray = 0;
       for (let i = stride; i < validSamples.length; i += stride) {
         const a = validSamples[i - stride];
         const b = validSamples[i];
         const avgAfr = (a.Afr + b.Afr) / 2;
         let color, isAfr = false;
-        if (avgAfr > 5 && avgAfr < 25) {
-          const afrCol = afrColor(avgAfr);
-          if (afrCol) { color = afrCol; isAfr = true; }
-          else color = "#666";
+        if (colorMode === "dev") {
+          // 偏差モード: WBO2 − Target の平均で色塗り
+          const aDev = (a.AfrTarget && a.AfrTarget > 5 && a.AfrTarget < 25 && a.Afr > 5 && a.Afr < 25)
+                       ? a.Afr - a.AfrTarget : null;
+          const bDev = (b.AfrTarget && b.AfrTarget > 5 && b.AfrTarget < 25 && b.Afr > 5 && b.Afr < 25)
+                       ? b.Afr - b.AfrTarget : null;
+          if (aDev !== null && bDev !== null) {
+            const avgDev = (aDev + bDev) / 2;
+            const devCol = devColor(avgDev);
+            if (devCol) { color = devCol; isAfr = true; }
+            else color = "#666";
+          } else {
+            color = "#666"; // ターゲット欠損
+          }
         } else {
-          color = "#666"; // AFR データなし／無効
+          // AFR 実測モード（既定）
+          if (avgAfr > 5 && avgAfr < 25) {
+            const afrCol = afrColor(avgAfr);
+            if (afrCol) { color = afrCol; isAfr = true; }
+            else color = "#666";
+          } else {
+            color = "#666"; // AFR データなし／無効
+          }
         }
         const seg = window.L.polyline([[a.Lat, a.Lon], [b.Lat, b.Lon]], {
           color: color,
@@ -1098,7 +1248,7 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
       console.error("[aRacer Lab] Track render failed:", e);
       setRenderStats({ valid: 0, segments: 0, afrColored: 0, gray: 0, rendered: false });
     }
-  }, [leafletStatus, samples, circuitDetection, onSelectFromMap]);
+  }, [leafletStatus, samples, circuitDetection, onSelectFromMap, colorMode]);
 
   // セル選択時のハイライト
   useEffect(() => {
@@ -1209,6 +1359,13 @@ const AboutModal = ({ onClose }) => (
           <span style={{ color: COLORS.target }}>● 緑系＝目標帯域内（target 12.5–13.5）</span><br />
           <span style={{ color: COLORS.danger }}>● 赤寄り＝薄い（リーン／危険域）</span></p>
         <p><strong style={{ color: COLORS.text }}>Track Map</strong> タブでは、GPS データを含むログでサーキット軌跡をAFR色塗り表示。ヒートマップ ⇔ 地図でセル選択を双方向リンクし、「リーン箇所がコース上のどこで発生したか」を特定可能。筑波（コース2000/1000）・もてぎ（北ショート/ロード）を自動判定。</p>
+        <p><strong style={{ color: COLORS.text }}>色塗りモード切替（v0.4.5〜）</strong>：View パネル右上の「色: AFR / 偏差」で切り替え可能。
+          <ul className="ml-4 mt-1 list-disc text-xs">
+            <li><strong>AFR モード（既定）</strong>：実測 AFR の絶対値で色塗り。「今この瞬間どこにいるか」が見える。</li>
+            <li><strong>偏差モード</strong>：<code className="font-mono text-xs" style={{ color: COLORS.accent }}>WBO2 実測 − Target AFR</code> で色塗り。0 = ターゲット合致（緑）、+ = リーン（赤）、− = リッチ（青）。「目標からどれだけずれているか」を直視できる。</li>
+          </ul>
+          偏差モードは ECU が狙う目標自体が RPM/TPS で変動するため、AFR モードで見過ごしがちな「目標が 13.0 のところで実測 13.5（薄い）」のような状態を一目で発見できます。公式 SpeedTuning には存在しない aracer_lab オリジナルの分析モード。
+        </p>
         <p className="text-xs" style={{ color: COLORS.textMuted }}>
           配色は aRacer SpeedTuning / HONDA 燃調ソフトの慣例に準拠（リーンが危険域＝赤）。<br/>
           二輪 FI 用 ECU 想定のため 4-stroke 専用。<br/>
@@ -1260,6 +1417,7 @@ const App = () => {
   const [hoveredCell, setHoveredCell] = useState(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [viewMode, setViewMode] = useState("heatmap"); // "heatmap" | "track"
+  const [colorMode, setColorMode] = useState("afr"); // "afr"（実測値） | "dev"（WBO2-Target 偏差）
   const fileInputRef = useRef(null);
 
   // Auto-adjust RPM range when a new file is loaded
@@ -1505,12 +1663,33 @@ const App = () => {
             {/* View toggle: Heatmap / Track */}
             <Panel title="View" accent
                    actions={
-                     <div className="font-mono text-[10px]" style={{ color: COLORS.textMuted }}>
-                       {viewMode === "heatmap"
-                         ? `target ${AFR_TARGET.low.toFixed(1)}–${AFR_TARGET.high.toFixed(1)} (mid ${AFR_TARGET.mid.toFixed(1)})`
-                         : (session.hasValidGps
-                             ? `${session.gpsValidCount} GPS pts · ${session.autoLaps?.length || 0} laps detected`
-                             : "GPS データなし")}
+                     <div className="flex items-center gap-3 flex-wrap justify-end font-mono text-[10px]">
+                       {/* Color mode toggle: AFR 実測 / 偏差 (WBO2-Target) */}
+                       <div className="flex items-center gap-1">
+                         <span style={{ color: COLORS.textMuted }}>色:</span>
+                         <button onClick={() => setColorMode("afr")}
+                                 style={{
+                                   color: colorMode === "afr" ? COLORS.accent : COLORS.textMuted,
+                                   fontWeight: colorMode === "afr" ? "bold" : "normal",
+                                   textDecoration: colorMode === "afr" ? "underline" : "none",
+                                 }}>AFR</button>
+                         <span style={{ color: COLORS.textMuted }}>/</span>
+                         <button onClick={() => setColorMode("dev")}
+                                 style={{
+                                   color: colorMode === "dev" ? COLORS.accent : COLORS.textMuted,
+                                   fontWeight: colorMode === "dev" ? "bold" : "normal",
+                                   textDecoration: colorMode === "dev" ? "underline" : "none",
+                                 }}>偏差</button>
+                       </div>
+                       <div style={{ color: COLORS.textMuted }}>
+                         {viewMode === "heatmap"
+                           ? (colorMode === "afr"
+                               ? `target ${AFR_TARGET.low.toFixed(1)}–${AFR_TARGET.high.toFixed(1)} (mid ${AFR_TARGET.mid.toFixed(1)})`
+                               : `偏差 = WBO2 − Target  (0=合致 / +=リーン / −=リッチ)`)
+                           : (session.hasValidGps
+                               ? `${session.gpsValidCount} GPS pts · ${session.autoLaps?.length || 0} laps detected`
+                               : "GPS データなし")}
+                       </div>
                      </div>
                    }>
               <div className="flex border-b" style={{ borderColor: COLORS.border }}>
@@ -1537,7 +1716,8 @@ const App = () => {
 
               {viewMode === "heatmap" && (
                 <FuelMapHeatmap cells={cells} rpmRange={rpmRange} tpsRange={tpsRange}
-                                hoveredCell={hoveredCell} setHoveredCell={setHoveredCell} />
+                                hoveredCell={hoveredCell} setHoveredCell={setHoveredCell}
+                                colorMode={colorMode} />
               )}
               {viewMode === "track" && session.hasValidGps && (
                 <TrackView samples={filteredSamples}
@@ -1545,7 +1725,8 @@ const App = () => {
                            hoveredCell={hoveredCell}
                            rpmRange={rpmRange} tpsRange={tpsRange}
                            rpmBins={rpmBins} tpsBins={tpsBins}
-                           onSelectFromMap={handleSelectFromMap} />
+                           onSelectFromMap={handleSelectFromMap}
+                           colorMode={colorMode} />
               )}
             </Panel>
 
@@ -1562,9 +1743,9 @@ const App = () => {
               <StatsPanel stats={stats} rpmBins={rpmBins} tpsBins={tpsBins} rpmRange={rpmRange} tpsRange={tpsRange} />
             </Panel>
 
-            <Panel title="AFR colour scale" accent>
+            <Panel title={colorMode === "dev" ? "Deviation colour scale" : "AFR colour scale"} accent>
               <div className="p-3">
-                <AfrLegend />
+                <AfrLegend colorMode={colorMode} />
               </div>
             </Panel>
 
