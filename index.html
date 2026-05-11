@@ -81,8 +81,19 @@
 const { useState, useMemo, useRef, useCallback, useEffect } = React;
 
 // ─── App version & changelog ────────────────────────────────
-const APP_VERSION = "0.4.6";
+const APP_VERSION = "0.4.7";
 const CHANGELOG = [
+  {
+    version: "0.4.7",
+    date: "2026-05-11",
+    notes: [
+      "リーンスポットの「燃料カット中（FC）」分類対応：`Fuel1.Dec_FC_En` フラグをパーサに追加し、リーンスポットを benign（燃料カット中）と実害候補（燃焼中なのに薄い）に分離",
+      "Track Map のマーカー描画：FC 中は半透明ゴースト表示（fillOpacity 0.18、サイズ縮小）、FC OFF は従来通り強色",
+      "View パネルのカウンタ表示：「危19+110FC」のように実害候補と FC 中を分離表示。実害候補が headline、FC 中は dimmed テキスト",
+      "ツールチップに「(FC中・燃焼なし)」表記追加で各点の状態が即判別可能",
+      "実データ検証で観察された「129件中ほとんどがブレーキング燃料カット起因」という直感が定量化される",
+    ],
+  },
   {
     version: "0.4.6",
     date: "2026-05-11",
@@ -356,22 +367,35 @@ const LEAN_SPOT_THRESHOLDS = {
 const LEAN_SPOT_MAX_MARKERS = 500;
 
 const computeLeanSpots = (samples) => {
-  if (!samples?.length) return { caution: [], warning: [], danger: [], total: 0 };
-  const out = { caution: [], warning: [], danger: [], total: 0 };
+  if (!samples?.length) return { caution: [], warning: [], danger: [], total: 0, fcTotal: 0 };
+  const out = { caution: [], warning: [], danger: [], total: 0, fcTotal: 0 };
   for (const s of samples) {
     if (!Number.isFinite(s.Lat) || !Number.isFinite(s.Lon)) continue;
     if (!s.Afr || s.Afr < 14.7) continue;
     if (!s.Rpm || s.Rpm < 4000) continue;
+    // 燃料カット中フラグ（0/1）— 不明なら 0 扱い
+    const fuelCut = !!s.FuelCutDec;
+    const spot = { lat: s.Lat, lon: s.Lon, afr: s.Afr, rpm: s.Rpm, tps: s.Tps, time: s.RunTime, fuelCut };
     // 強度判定（高い方から優先評価）
     if (s.Afr >= LEAN_SPOT_THRESHOLDS.danger.afrMin) {
-      out.danger.push({ lat: s.Lat, lon: s.Lon, afr: s.Afr, rpm: s.Rpm, tps: s.Tps, time: s.RunTime });
+      out.danger.push(spot);
     } else if (s.Afr >= LEAN_SPOT_THRESHOLDS.warning.afrMin && s.Tps >= LEAN_SPOT_THRESHOLDS.warning.tpsMin) {
-      out.warning.push({ lat: s.Lat, lon: s.Lon, afr: s.Afr, rpm: s.Rpm, tps: s.Tps, time: s.RunTime });
+      out.warning.push(spot);
     } else if (s.Afr >= LEAN_SPOT_THRESHOLDS.caution.afrMin && s.Tps >= LEAN_SPOT_THRESHOLDS.caution.tpsMin) {
-      out.caution.push({ lat: s.Lat, lon: s.Lon, afr: s.Afr, rpm: s.Rpm, tps: s.Tps, time: s.RunTime });
+      out.caution.push(spot);
+    } else {
+      continue;
     }
+    if (fuelCut) out.fcTotal++;
   }
   out.total = out.caution.length + out.warning.length + out.danger.length;
+  // 「実害候補（燃料カット OFF）」のカウントも事前計算
+  out.dangerReal  = out.danger.filter(s => !s.fuelCut).length;
+  out.warningReal = out.warning.filter(s => !s.fuelCut).length;
+  out.cautionReal = out.caution.filter(s => !s.fuelCut).length;
+  out.dangerFC    = out.danger.length - out.dangerReal;
+  out.warningFC   = out.warning.length - out.warningReal;
+  out.cautionFC   = out.caution.length - out.cautionReal;
   return out;
 };
 
@@ -423,6 +447,7 @@ const parseAracerLog = (text, format) => {
     Wbo2Ready:    findIdx("wbo2_ready"),
     PowerEn:      findIdx("power_en"),
     RpmLimit:     findIdx("rpm_limit"),
+    FuelCutDec:   findIdx("dec_fc_en"),     // Fuel1.Dec_FC_En = 減速燃料カット作動フラグ（0/1）
     // GPS（LM形式 / RFM2.5装着 ECU形式 で取得可能）
     // 2系統のカラム命名規則に対応：
     //   (a) SP形式（aRacer Smart アプリ公式マニュアル準拠）: GPS_latitude / GPS_longitude を十進度で直接保持
@@ -510,6 +535,7 @@ const parseAracerLog = (text, format) => {
       Wbo2Ready:   intNum(idx.Wbo2Ready),
       PowerEn:     intNum(idx.PowerEn),
       RpmLimit:    intNum(idx.RpmLimit),
+      FuelCutDec:  intNum(idx.FuelCutDec),
       Lat:         lat,
       Lon:         lon,
       GpsSpeed:    num(idx.GpsSpeed),
@@ -1321,22 +1347,25 @@ const TrackView = ({ samples, circuitDetection, hoveredCell, rpmRange, tpsRange,
       const markers = [];
       for (const s of capped) {
         const cfg = LEAN_SPOT_THRESHOLDS[s.level];
+        // 燃料カット中の点は「ゴースト」表示：fillOpacity 大幅減・サイズ縮小
+        // 燃料カット OFF の点は強表示：燃焼中に薄い = 実害候補
+        const fc = !!s.fuelCut;
         const m = window.L.circleMarker([s.lat, s.lon], {
-          radius: cfg.radius,
-          color: "#000",
-          weight: 1,
-          opacity: 0.85,
-          fillColor: cfg.color,
-          fillOpacity: 0.92,
+          radius:      fc ? Math.max(2, cfg.radius - 2) : cfg.radius,
+          color:       fc ? cfg.color : "#000",
+          weight:      fc ? 1 : 1,
+          opacity:     fc ? 0.55 : 0.85,
+          fillColor:   cfg.color,
+          fillOpacity: fc ? 0.18 : 0.92,
         }).bindTooltip(
-          `${cfg.label} · AFR ${s.afr.toFixed(1)} · RPM ${Math.round(s.rpm)} · TPS ${Math.round(s.tps)}%`,
+          `${cfg.label}${fc ? " (FC中・燃焼なし)" : ""} · AFR ${s.afr.toFixed(1)} · RPM ${Math.round(s.rpm)} · TPS ${Math.round(s.tps)}%`,
           { direction: "top", offset: [0, -2] }
         );
         m.addTo(map);
         markers.push(m);
       }
       layersRef.current.leanSpots = markers;
-      console.log("[aRacer Lab] lean spots rendered: " + markers.length + " / " + leanSpots.total + " (danger=" + leanSpots.danger.length + " warning=" + leanSpots.warning.length + " caution=" + leanSpots.caution.length + ")");
+      console.log("[aRacer Lab] lean spots rendered: " + markers.length + " / " + leanSpots.total + " (danger=" + leanSpots.danger.length + "(real=" + leanSpots.dangerReal + ",FC=" + leanSpots.dangerFC + ") warning=" + leanSpots.warning.length + " caution=" + leanSpots.caution.length + ")");
     } catch (e) {
       console.error("[aRacer Lab] Lean spot render failed:", e);
     }
@@ -1465,6 +1494,13 @@ const AboutModal = ({ onClose }) => (
             <li><span style={{ color: "#ef4444" }}>● 危険</span>：AFR ≥18.0、RPM≥4,000（TPS gate なし、エンジンブレーキ中の致命的リーンも捕捉）</li>
           </ul>
           各マーカーに AFR/RPM/TPS の正確値ツールチップ。コース上のどこで集中しているかを見れば「ブレーキング・コーナー進入・全開区間」のどこに問題が偏っているかが明確になります。
+        </p>
+        <p><strong style={{ color: COLORS.text }}>燃料カット（FC）分類（v0.4.7〜）</strong>：リーンスポットは <code className="font-mono text-xs" style={{ color: COLORS.accent }}>Fuel1.Dec_FC_En</code> フラグを参照して「燃料カット中（FC）」と「燃焼中なのに薄い（実害候補）」を分離表示します。
+          <ul className="ml-4 mt-1 list-disc text-xs">
+            <li><strong>FC 中</strong>：減速時の燃料カットによるリーン。燃焼が起きていないため AFR=18 でも害は少ない → 半透明のゴースト表示</li>
+            <li><strong>FC OFF</strong>：燃料カット OFF なのに薄い状態。エンブレ補正不足や燃調マップの薄さが疑われる → 強色表示</li>
+          </ul>
+          カウンタも分離表示：「危19+110FC」のように、危険レベルの実害候補が19件、燃料カット中で benign なものが110件、という見方ができます。
         </p>
         <p className="text-xs" style={{ color: COLORS.textMuted }}>
           配色は aRacer SpeedTuning / HONDA 燃調ソフトの慣例に準拠（リーンが危険域＝赤）。<br/>
@@ -1794,9 +1830,9 @@ const App = () => {
                            <span>リーンスポット</span>
                            {showLeanSpots && leanSpots.total > 0 && (
                              <span className="ml-1">
-                               (<span style={{ color: "#ef4444" }}>危{leanSpots.danger.length}</span>
-                               {" "}<span style={{ color: "#f97316" }}>警{leanSpots.warning.length}</span>
-                               {" "}<span style={{ color: "#eab308" }}>注{leanSpots.caution.length}</span>)
+                               (<span style={{ color: "#ef4444" }}>危{leanSpots.dangerReal}{leanSpots.dangerFC > 0 && <span style={{ opacity: 0.6 }}>+{leanSpots.dangerFC}FC</span>}</span>
+                               {" "}<span style={{ color: "#f97316" }}>警{leanSpots.warningReal}{leanSpots.warningFC > 0 && <span style={{ opacity: 0.6 }}>+{leanSpots.warningFC}FC</span>}</span>
+                               {" "}<span style={{ color: "#eab308" }}>注{leanSpots.cautionReal}{leanSpots.cautionFC > 0 && <span style={{ opacity: 0.6 }}>+{leanSpots.cautionFC}FC</span>}</span>)
                              </span>
                            )}
                          </label>
