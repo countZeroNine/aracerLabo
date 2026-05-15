@@ -158,7 +158,7 @@ export default function App() {
                   style={{ color: COLORS.textDim, border: `1px solid ${COLORS.border}` }}>
             ?
           </button>
-          <input ref={fileInputRef} type="file" accept="＊"
+          <input ref={fileInputRef} type="file" accept=".loga,text/plain,text/csv,application/octet-stream"
                  className="hidden"
                  onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }} />
           <button onClick={() => fileInputRef.current?.click()}
