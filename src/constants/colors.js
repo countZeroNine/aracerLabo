@@ -1,0 +1,16 @@
+export const COLORS = {
+  bg:          "var(--bg-deep)",
+  panel:       "var(--bg-panel)",
+  cell:        "var(--bg-cell)",
+  border:      "var(--border)",
+  borderBright:"var(--border-bright)",
+  accent:      "var(--accent)",
+  accentBright:"var(--accent-bright)",
+  cool:        "var(--cool)",
+  target:      "var(--target)",
+  warn:        "var(--warn)",
+  danger:      "var(--danger)",
+  text:        "var(--text)",
+  textDim:     "var(--text-dim)",
+  textMuted:   "var(--text-muted)",
+};

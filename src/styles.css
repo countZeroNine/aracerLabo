@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+/* ─── CSS 変数（カラートークン）──────────────────────────── */
+:root {
+  --bg-deep:       #08090b;
+  --bg-panel:      #0f1115;
+  --bg-cell:       #15171c;
+  --border:        #232730;
+  --border-bright: #3a4150;
+  --accent:        #fb923c;
+  --accent-bright: #fed7aa;
+  --cool:          #38bdf8;
+  --target:        #84cc16;
+  --warn:          #fbbf24;
+  --danger:        #ef4444;
+  --text:          #fafaf9;
+  --text-dim:      #a1a1aa;
+  --text-muted:    #52525b;
+}
+
+/* ─── Base ──────────────────────────────────────────────── */
+html, body, #root {
+  background: var(--bg-deep);
+  color: var(--text);
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+body {
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+}
+.font-mono, code, kbd, pre {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* ─── Scrollbar ─────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-deep); }
+::-webkit-scrollbar-thumb { background: var(--border); }
+::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
+
+/* ─── ECU cell aesthetic ────────────────────────────────── */
+.scanlines::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(0deg,
+    rgba(255,255,255,0.012) 0px,
+    rgba(255,255,255,0.012) 1px,
+    transparent 1px, transparent 3px);
+  pointer-events: none;
+}
+.tnum { font-variant-numeric: tabular-nums; }
+.cell-hot { stroke: var(--accent-bright) !important; stroke-width: 2 !important; }
+
+/* ─── Leaflet dark mode ─────────────────────────────────── */
+.leaflet-container {
+  background: #0a0c10;
+  font-family: 'JetBrains Mono', monospace;
+}
+.leaflet-tile-pane {
+  filter: brightness(0.65) saturate(0.75) hue-rotate(180deg) invert(1);
+}
+.leaflet-control-attribution {
+  background: rgba(15, 17, 21, 0.8) !important;
+  color: rgba(180, 180, 200, 0.5) !important;
+  font-size: 9px !important;
+}
+.leaflet-control-attribution a { color: rgba(180, 180, 200, 0.7) !important; }
+.leaflet-control-zoom a {
+  background: #0f1115 !important;
+  color: #fb923c !important;
+  border-color: #1f2530 !important;
+}
+.leaflet-control-zoom a:hover { background: #1a1d24 !important; }
