@@ -11,7 +11,7 @@ export const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
       e.n++;
       e.t1 = s.RunTime;
     }
-    return [...m.values()].sort((a, b) => a.lap - b.lap);
+    return [...m.values()].filter(l => l.lap > 0).sort((a, b) => a.lap - b.lap);
   }, [samples]);
 
   if (laps.length <= 1) return null;

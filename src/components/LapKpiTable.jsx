@@ -38,7 +38,7 @@ export const LapKpiTable = ({ samples, lapFilter, setLapFilter }) => {
         }
       }
     }
-    return [...m.values()].sort((a, b) => a.lap - b.lap);
+    return [...m.values()].filter(l => l.lap > 0).sort((a, b) => a.lap - b.lap);
   }, [samples]);
 
   if (lapKpis.length <= 1) return null;
@@ -46,7 +46,7 @@ export const LapKpiTable = ({ samples, lapFilter, setLapFilter }) => {
   let bestLap = null, bestDur = Infinity;
   for (const l of lapKpis) {
     const dur = l.t1 - l.t0;
-    if (dur > 20 && dur < bestDur) { bestDur = dur; bestLap = l.lap; }
+    if (dur > 5 && dur < bestDur) { bestDur = dur; bestLap = l.lap; }
   }
 
   const devColorOf = (dev) => {
