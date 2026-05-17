@@ -1,5 +1,13 @@
 export const CHANGELOG = [
   {
+    version: "0.5.1",
+    date: "2026-05-18",
+    notes: [
+      "GPS ラップ検出: フィニッシュライン線分を両端各 20m 延長（GATE_EXTEND_M）— GPS 軌跡が線分端をかすめる場合の検出漏れを修正（drogger v1.7.0 で実証済みのロジックを移植）",
+      "Lap KPI 表: ベストラップ（★）判定から 30 秒未満の断片ラップを除外",
+    ],
+  },
+  {
     version: "0.5.0",
     date: "2026-05-15",
     notes: [
