@@ -38,6 +38,9 @@ export const detectLapsByFinishLine = (samples, finishLine) => {
   if (!finishLine || samples.length < 2) return [];
   const fA = { x: finishLine[0].lon, y: finishLine[0].lat };
   const fB = { x: finishLine[1].lon, y: finishLine[1].lat };
+  // FL 線分を両端から 20m ずつ延長
+  // GPS 軌跡が線分の外端を 1〜2m かすめる場合の検出漏れを防ぐ
+  // もてぎ北ショート FL 実長 ≈ 37m → 延長後 71m（drogger v1.7.0 で実証済み）
   const GATE_EXTEND_M = 20;
   const cosMid = Math.cos(((fA.y + fB.y) / 2) * Math.PI / 180);
   const dx = (fB.x - fA.x) * 111320 * cosMid;
