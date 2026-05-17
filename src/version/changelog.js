@@ -1,5 +1,13 @@
 export const CHANGELOG = [
   {
+    version: "0.5.3",
+    date: "2026-05-18",
+    notes: [
+      "GPS ラップ検出: drogger v1.7.0 と完全同一方式に移行（prevS=null + crossTimes RunTime ベース）",
+      "インデックスベースのラップ番号付けを廃止し、補間通過時刻（crossTimes）による RunTime 比較方式に変更",
+    ],
+  },
+  {
     version: "0.5.2",
     date: "2026-05-18",
     notes: [
