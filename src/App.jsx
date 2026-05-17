@@ -70,13 +70,15 @@ export default function App() {
       if (hasValidGps) {
         circuitDetection = detectCircuit(data);
         if (circuitDetection?.circuit?.finishLine) {
-          autoLaps = detectLapsByFinishLine(data, circuitDetection.circuit.finishLine);
-          if (autoLaps.length > 0) {
-            for (let lapI = 0; lapI < autoLaps.length; lapI++) {
-              for (let i = autoLaps[lapI].start; i < autoLaps[lapI].end; i++) {
-                data[i].Lap = lapI + 1;
-              }
+          // drogger v1.7.0 準拠: crossTimes を RunTime 比較で Lap 番号に変換
+          const crossTimes = detectLapsByFinishLine(data, circuitDetection.circuit.finishLine);
+          if (crossTimes.length > 0) {
+            let lapNum = 0, ci = 0;
+            for (const d of data) {
+              while (ci < crossTimes.length && d.RunTime >= crossTimes[ci]) { lapNum++; ci++; }
+              d.Lap = lapNum;
             }
+            autoLaps = crossTimes;
           }
         }
       }
@@ -158,7 +160,7 @@ export default function App() {
                   style={{ color: COLORS.textDim, border: `1px solid ${COLORS.border}` }}>
             ?
           </button>
-          <input ref={fileInputRef} type="file" accept=".loga,text/plain,text/csv,application/octet-stream"
+          <input ref={fileInputRef} type="file" accept=".loga,text/plain"
                  className="hidden"
                  onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }} />
           <button onClick={() => fileInputRef.current?.click()}
