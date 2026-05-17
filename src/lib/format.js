@@ -2,7 +2,7 @@ export const fmtNum = (n, d = 1) => n == null || isNaN(n) ? "—" : n.toFixed(d)
 
 export const fmtTime = (s) => {
   if (!s || s < 0) return "—";
-  const m = Math.floor(s / 60), sec = (s % 60).toFixed(1).padStart(4, "0");
+  const m = Math.floor(s / 60), sec = (s % 60).toFixed(3).padStart(6, "0");
   return `${m}:${sec}`;
 };
 
