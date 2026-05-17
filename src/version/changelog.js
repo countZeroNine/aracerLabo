@@ -1,5 +1,13 @@
 export const CHANGELOG = [
   {
+    version: "0.5.4",
+    date: "2026-05-18",
+    notes: [
+      "ラップタイム表示を 1/10秒 → 1/1000秒（ミリ秒）に変更（aRacer 30Hz 分解能に対応）",
+      "Lap Filter / KPI 表から Lap 0（検出前断片）を除外（ALL には含む）",
+    ],
+  },
+  {
     version: "0.5.3",
     date: "2026-05-18",
     notes: [
