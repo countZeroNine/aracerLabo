@@ -1,5 +1,15 @@
 export const CHANGELOG = [
   {
+    version: "0.5.2",
+    date: "2026-05-18",
+    notes: [
+      "GPS ラップ検出: segmentsIntersect を XY メートル系＋ε許容（0.001）に全面置き換え（drogger v1.7.0 準拠）",
+      "生の度数系では分母が〜1e-7 で浮動小数点誤差が大きく端点付近で検出漏れが発生していた",
+      "メートル系では分母〜1e4 で精度が高く、もてぎ北ショートで L1 = 4:48 の誤検出が解消",
+      "COOLDOWN_S を 30s → 20s に変更（drogger に合わせる）",
+    ],
+  },
+  {
     version: "0.5.1",
     date: "2026-05-18",
     notes: [
