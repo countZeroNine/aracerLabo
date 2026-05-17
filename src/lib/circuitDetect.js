@@ -38,6 +38,19 @@ export const detectLapsByFinishLine = (samples, finishLine) => {
   if (!finishLine || samples.length < 2) return [];
   const fA = { x: finishLine[0].lon, y: finishLine[0].lat };
   const fB = { x: finishLine[1].lon, y: finishLine[1].lat };
+  const GATE_EXTEND_M = 20;
+  const cosMid = Math.cos(((fA.y + fB.y) / 2) * Math.PI / 180);
+  const dx = (fB.x - fA.x) * 111320 * cosMid;
+  const dy = (fB.y - fA.y) * 111320;
+  const fLen = Math.hypot(dx, dy);
+  let gA = fA, gB = fB;
+  if (fLen > 1) {
+    const ux = dx / fLen, uy = dy / fLen;
+    gA = { x: fA.x - ux * GATE_EXTEND_M / (111320 * cosMid),
+           y: fA.y - uy * GATE_EXTEND_M / 111320 };
+    gB = { x: fB.x + ux * GATE_EXTEND_M / (111320 * cosMid),
+           y: fB.y + uy * GATE_EXTEND_M / 111320 };
+  }
   const laps = [];
   let lapStart = 0;
   const MIN_LAP_SEC = 30;
@@ -46,7 +59,7 @@ export const detectLapsByFinishLine = (samples, finishLine) => {
     if (isNaN(a.Lat) || isNaN(b.Lat)) continue;
     const p1 = { x: a.Lon, y: a.Lat };
     const p2 = { x: b.Lon, y: b.Lat };
-    if (segmentsIntersect(p1, p2, fA, fB)) {
+    if (segmentsIntersect(p1, p2, gA, gB)) {
       const lapDuration = b.RunTime - samples[lapStart].RunTime;
       if (lapDuration >= MIN_LAP_SEC) {
         laps.push({ start: lapStart, end: i, t0: samples[lapStart].RunTime, t1: b.RunTime, durationSec: lapDuration });
