@@ -24,8 +24,6 @@ export const detectCircuit = (samples) => {
 };
 
 // drogger v1.7.0 準拠：ε 許容付き、XY メートル系で計算
-// 生の度数系では分母が〜1e-7 となり浮動小数点誤差が大きく端点付近で t が 1.0001 に
-// なる。メートル系なら分母〜1e4 で精度が高く、ε で残る誤差も吸収できる。
 const segmentsIntersect = (ax, ay, bx, by, cx, cy, dx, dy) => {
   const denom = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
   if (Math.abs(denom) < 1e-9) return false;
@@ -35,20 +33,24 @@ const segmentsIntersect = (ax, ay, bx, by, cx, cy, dx, dy) => {
   return t >= -ε && t <= 1 + ε && u >= -ε && u <= 1 + ε;
 };
 
+// drogger v1.7.0 Pass 1 の完全移植版
+// 戻り値: crossTimes（各フィニッシュライン通過の補間時刻の配列）
+// App.jsx 側で RunTime 比較により data[].Lap を直接書き換える（drogger 準拠）
 export const detectLapsByFinishLine = (samples, finishLine) => {
   if (!finishLine || samples.length < 2) return [];
 
-  // ローカル XY メートル系の原点（最初の有効 GPS 点）
-  const validFirst = samples.find(s => !isNaN(s.Lat) && !isNaN(s.Lon));
-  if (!validFirst) return [];
-  const lat0 = validFirst.Lat, lon0 = validFirst.Lon;
+  const validGps = samples.filter(s => Number.isFinite(s.Lat) && Number.isFinite(s.Lon));
+  if (!validGps.length) return [];
+
+  // ローカル XY メートル系（drogger は validGps[0] を原点にする）
+  const lat0 = validGps[0].Lat, lon0 = validGps[0].Lon;
   const cosLat = Math.cos(lat0 * Math.PI / 180);
   const toXY = (lat, lon) => [
     (lon - lon0) * 111320 * cosLat,
     (lat - lat0) * 111320,
   ];
 
-  // ゲート生成：FL 線分をメートル系で 20m ずつ延長（drogger 準拠）
+  // ゲート生成（FL 線分を 20m ずつ延長）
   const [fx1, fy1] = toXY(finishLine[0].lat, finishLine[0].lon);
   const [fx2, fy2] = toXY(finishLine[1].lat, finishLine[1].lon);
   const GATE_EXTEND_M = 20;
@@ -57,22 +59,23 @@ export const detectLapsByFinishLine = (samples, finishLine) => {
   const gx1 = fx1 - fux * GATE_EXTEND_M, gy1 = fy1 - fuy * GATE_EXTEND_M;
   const gx2 = fx2 + fux * GATE_EXTEND_M, gy2 = fy2 + fuy * GATE_EXTEND_M;
 
-  const COOLDOWN_S = 20; // drogger に合わせて 30→20 秒
-  const laps = [];
-  let lapStart = 0;
+  // drogger と同じ prevR=null パターン：GPS ギャップ後は前点をリセット
+  const COOLDOWN_S = 20;
+  const crossTimes = [];
+  let prevS = null;
   let lastCrossTime = -1e9;
 
-  for (let i = 1; i < samples.length; i++) {
-    const a = samples[i - 1], b = samples[i];
-    if (isNaN(a.Lat) || isNaN(b.Lat)) continue;
-    if (b.RunTime - lastCrossTime <= COOLDOWN_S) continue;
-    const [ax, ay] = toXY(a.Lat, a.Lon);
-    const [bx, by] = toXY(b.Lat, b.Lon);
-    if (segmentsIntersect(ax, ay, bx, by, gx1, gy1, gx2, gy2)) {
-      laps.push({ start: lapStart, end: i, t0: samples[lapStart].RunTime, t1: b.RunTime, durationSec: b.RunTime - samples[lapStart].RunTime });
-      lapStart = i;
-      lastCrossTime = b.RunTime;
+  for (const s of samples) {
+    if (!Number.isFinite(s.Lat) || !Number.isFinite(s.Lon)) { prevS = null; continue; }
+    if (prevS && s.RunTime - lastCrossTime > COOLDOWN_S) {
+      const [px, py] = toXY(prevS.Lat, prevS.Lon);
+      const [cx, cy] = toXY(s.Lat, s.Lon);
+      if (segmentsIntersect(px, py, cx, cy, gx1, gy1, gx2, gy2)) {
+        crossTimes.push((prevS.RunTime + s.RunTime) / 2); // 補間通過時刻
+        lastCrossTime = s.RunTime;
+      }
     }
+    prevS = s;
   }
-  return laps;
+  return crossTimes;
 };
