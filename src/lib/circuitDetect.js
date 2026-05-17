@@ -23,51 +23,55 @@ export const detectCircuit = (samples) => {
   return bestDist < 5000 ? { circuit: best, distFromFinishM: bestDist, centroid: { lat: cLat, lon: cLon } } : null;
 };
 
-const segmentsIntersect = (p1, p2, p3, p4) => {
-  const cross = (a, b) => a.x * b.y - a.y * b.x;
-  const sub = (a, b) => ({ x: a.x - b.x, y: a.y - b.y });
-  const r = sub(p2, p1), s = sub(p4, p3);
-  const rxs = cross(r, s);
-  if (Math.abs(rxs) < 1e-12) return false;
-  const t = cross(sub(p3, p1), s) / rxs;
-  const u = cross(sub(p3, p1), r) / rxs;
-  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+// drogger v1.7.0 準拠：ε 許容付き、XY メートル系で計算
+// 生の度数系では分母が〜1e-7 となり浮動小数点誤差が大きく端点付近で t が 1.0001 に
+// なる。メートル系なら分母〜1e4 で精度が高く、ε で残る誤差も吸収できる。
+const segmentsIntersect = (ax, ay, bx, by, cx, cy, dx, dy) => {
+  const denom = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
+  if (Math.abs(denom) < 1e-9) return false;
+  const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / denom;
+  const u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / denom;
+  const ε = 0.001;
+  return t >= -ε && t <= 1 + ε && u >= -ε && u <= 1 + ε;
 };
 
 export const detectLapsByFinishLine = (samples, finishLine) => {
   if (!finishLine || samples.length < 2) return [];
-  const fA = { x: finishLine[0].lon, y: finishLine[0].lat };
-  const fB = { x: finishLine[1].lon, y: finishLine[1].lat };
-  // FL 線分を両端から 20m ずつ延長
-  // GPS 軌跡が線分の外端を 1〜2m かすめる場合の検出漏れを防ぐ
-  // もてぎ北ショート FL 実長 ≈ 37m → 延長後 71m（drogger v1.7.0 で実証済み）
+
+  // ローカル XY メートル系の原点（最初の有効 GPS 点）
+  const validFirst = samples.find(s => !isNaN(s.Lat) && !isNaN(s.Lon));
+  if (!validFirst) return [];
+  const lat0 = validFirst.Lat, lon0 = validFirst.Lon;
+  const cosLat = Math.cos(lat0 * Math.PI / 180);
+  const toXY = (lat, lon) => [
+    (lon - lon0) * 111320 * cosLat,
+    (lat - lat0) * 111320,
+  ];
+
+  // ゲート生成：FL 線分をメートル系で 20m ずつ延長（drogger 準拠）
+  const [fx1, fy1] = toXY(finishLine[0].lat, finishLine[0].lon);
+  const [fx2, fy2] = toXY(finishLine[1].lat, finishLine[1].lon);
   const GATE_EXTEND_M = 20;
-  const cosMid = Math.cos(((fA.y + fB.y) / 2) * Math.PI / 180);
-  const dx = (fB.x - fA.x) * 111320 * cosMid;
-  const dy = (fB.y - fA.y) * 111320;
-  const fLen = Math.hypot(dx, dy);
-  let gA = fA, gB = fB;
-  if (fLen > 1) {
-    const ux = dx / fLen, uy = dy / fLen;
-    gA = { x: fA.x - ux * GATE_EXTEND_M / (111320 * cosMid),
-           y: fA.y - uy * GATE_EXTEND_M / 111320 };
-    gB = { x: fB.x + ux * GATE_EXTEND_M / (111320 * cosMid),
-           y: fB.y + uy * GATE_EXTEND_M / 111320 };
-  }
+  const fLen = Math.hypot(fx2 - fx1, fy2 - fy1);
+  const [fux, fuy] = fLen > 0 ? [(fx2 - fx1) / fLen, (fy2 - fy1) / fLen] : [1, 0];
+  const gx1 = fx1 - fux * GATE_EXTEND_M, gy1 = fy1 - fuy * GATE_EXTEND_M;
+  const gx2 = fx2 + fux * GATE_EXTEND_M, gy2 = fy2 + fuy * GATE_EXTEND_M;
+
+  const COOLDOWN_S = 20; // drogger に合わせて 30→20 秒
   const laps = [];
   let lapStart = 0;
-  const MIN_LAP_SEC = 30;
+  let lastCrossTime = -1e9;
+
   for (let i = 1; i < samples.length; i++) {
-    const a = samples[i-1], b = samples[i];
+    const a = samples[i - 1], b = samples[i];
     if (isNaN(a.Lat) || isNaN(b.Lat)) continue;
-    const p1 = { x: a.Lon, y: a.Lat };
-    const p2 = { x: b.Lon, y: b.Lat };
-    if (segmentsIntersect(p1, p2, gA, gB)) {
-      const lapDuration = b.RunTime - samples[lapStart].RunTime;
-      if (lapDuration >= MIN_LAP_SEC) {
-        laps.push({ start: lapStart, end: i, t0: samples[lapStart].RunTime, t1: b.RunTime, durationSec: lapDuration });
-        lapStart = i;
-      }
+    if (b.RunTime - lastCrossTime <= COOLDOWN_S) continue;
+    const [ax, ay] = toXY(a.Lat, a.Lon);
+    const [bx, by] = toXY(b.Lat, b.Lon);
+    if (segmentsIntersect(ax, ay, bx, by, gx1, gy1, gx2, gy2)) {
+      laps.push({ start: lapStart, end: i, t0: samples[lapStart].RunTime, t1: b.RunTime, durationSec: b.RunTime - samples[lapStart].RunTime });
+      lapStart = i;
+      lastCrossTime = b.RunTime;
     }
   }
   return laps;
