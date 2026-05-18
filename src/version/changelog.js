@@ -1,5 +1,13 @@
 export const CHANGELOG = [
   {
+    version: "0.5.8",
+    date: "2026-05-18",
+    notes: [
+      "ラップタイム計算: フィルター前の全ラップ配列で duration を事前計算・_dur として引き継ぎ",
+      "最終表示ラップ（L23）が nextLap=undefined フォールバックになって -94ms ズレる問題を修正",
+    ],
+  },
+  {
     version: "0.5.7",
     date: "2026-05-18",
     notes: [
