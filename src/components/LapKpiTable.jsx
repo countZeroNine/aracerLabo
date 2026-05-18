@@ -44,9 +44,11 @@ export const LapKpiTable = ({ samples, lapFilter, setLapFilter }) => {
   if (lapKpis.length <= 1) return null;
 
   let bestLap = null, bestDur = Infinity;
-  for (const l of lapKpis) {
-    const dur = l.t1 - l.t0;
-    if (dur > 5 && dur < bestDur) { bestDur = dur; bestLap = l.lap; }
+  for (let i = 0; i < lapKpis.length; i++) {
+    const l = lapKpis[i];
+    const nextL = lapKpis[i + 1];
+    const dur = nextL ? nextL.t0 - l.t0 : l.t1 - l.t0;
+    if (dur >= 30 && dur < bestDur) { bestDur = dur; bestLap = l.lap; }
   }
 
   const devColorOf = (dev) => {
@@ -79,8 +81,9 @@ export const LapKpiTable = ({ samples, lapFilter, setLapFilter }) => {
           </tr>
         </thead>
         <tbody>
-          {lapKpis.map((l) => {
-            const dur = l.t1 - l.t0;
+          {lapKpis.map((l, idx) => {
+            const nextL = lapKpis[idx + 1];
+            const dur = nextL ? nextL.t0 - l.t0 : l.t1 - l.t0;
             const meanDev = l.devN > 0 ? l.devSum / l.devN : null;
             const inTargetPct = l.afrN > 0 ? 100 * l.inTarget / l.afrN : 0;
             const active = lapFilter.has(l.lap);

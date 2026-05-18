@@ -28,8 +28,9 @@ export const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
                 }}>
           ALL
         </button>
-        {laps.map((l) => {
-          const dur = l.t1 - l.t0;
+        {laps.map((l, idx) => {
+          const nextLap = laps[idx + 1];
+          const dur = nextLap ? nextLap.t0 - l.t0 : l.t1 - l.t0;
           const active = lapFilter.has(l.lap);
           return (
             <button key={l.lap}
