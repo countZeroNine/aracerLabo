@@ -11,7 +11,15 @@ export const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
       e.n++;
       e.t1 = s.RunTime;
     }
-    return [...m.values()].filter(l => l.lap > 0).sort((a, b) => a.lap - b.lap);
+    const all = [...m.values()].filter(l => l.lap > 0).sort((a, b) => a.lap - b.lap);
+    // drogger 準拠: 中央値 × 0.55〜1.7 でレーシングラップを絞り込む
+    const durs = all.map((l, i) => {
+      const next = all[i + 1];
+      return next ? next.t0 - l.t0 : l.t1 - l.t0;
+    });
+    const sorted = [...durs].sort((a, b) => a - b);
+    const med = sorted[Math.floor(sorted.length / 2)] || 60;
+    return all.filter((_, i) => durs[i] >= med * 0.55 && durs[i] <= med * 1.7);
   }, [samples]);
 
   if (laps.length <= 1) return null;
