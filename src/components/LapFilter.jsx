@@ -19,7 +19,9 @@ export const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
     });
     const sorted = [...durs].sort((a, b) => a - b);
     const med = sorted[Math.floor(sorted.length / 2)] || 60;
-    return all.filter((_, i) => durs[i] >= med * 0.55 && durs[i] <= med * 1.7);
+    return all
+      .map((l, i) => ({ ...l, _dur: durs[i] }))
+      .filter((_, i) => durs[i] >= med * 0.55 && durs[i] <= med * 1.7);
   }, [samples]);
 
   if (laps.length <= 1) return null;
@@ -37,8 +39,7 @@ export const LapFilter = ({ samples, lapFilter, setLapFilter }) => {
           ALL
         </button>
         {laps.map((l, idx) => {
-          const nextLap = laps[idx + 1];
-          const dur = nextLap ? nextLap.t0 - l.t0 : l.t1 - l.t0;
+          const dur = l._dur;
           const active = lapFilter.has(l.lap);
           return (
             <button key={l.lap}

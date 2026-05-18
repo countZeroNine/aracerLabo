@@ -46,7 +46,9 @@ export const LapKpiTable = ({ samples, lapFilter, setLapFilter }) => {
     });
     const sorted = [...durs].sort((a, b) => a - b);
     const med = sorted[Math.floor(sorted.length / 2)] || 60;
-    return all.filter((_, i) => durs[i] >= med * 0.55 && durs[i] <= med * 1.7);
+    return all
+      .map((l, i) => ({ ...l, _dur: durs[i] }))
+      .filter((_, i) => durs[i] >= med * 0.55 && durs[i] <= med * 1.7);
   }, [samples]);
 
   if (lapKpis.length <= 1) return null;
@@ -54,8 +56,7 @@ export const LapKpiTable = ({ samples, lapFilter, setLapFilter }) => {
   let bestLap = null, bestDur = Infinity;
   for (let i = 0; i < lapKpis.length; i++) {
     const l = lapKpis[i];
-    const nextL = lapKpis[i + 1];
-    const dur = nextL ? nextL.t0 - l.t0 : l.t1 - l.t0;
+    const dur = l._dur;
     if (dur >= 30 && dur < bestDur) { bestDur = dur; bestLap = l.lap; }
   }
 
@@ -90,8 +91,7 @@ export const LapKpiTable = ({ samples, lapFilter, setLapFilter }) => {
         </thead>
         <tbody>
           {lapKpis.map((l, idx) => {
-            const nextL = lapKpis[idx + 1];
-            const dur = nextL ? nextL.t0 - l.t0 : l.t1 - l.t0;
+            const dur = l._dur;
             const meanDev = l.devN > 0 ? l.devSum / l.devN : null;
             const inTargetPct = l.afrN > 0 ? 100 * l.inTarget / l.afrN : 0;
             const active = lapFilter.has(l.lap);
