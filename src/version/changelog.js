@@ -1,5 +1,21 @@
 export const CHANGELOG = [
   {
+    version: "0.5.6",
+    date: "2026-05-18",
+    notes: [
+      "ラップタイム計算: 最初/最後サンプル差分から『次ラップの最初サンプル − 現ラップの最初サンプル』に変更（drogger と一致）",
+      "ベストラップ判定も同様に修正（30秒未満は除外）",
+    ],
+  },
+  {
+    version: "0.5.5",
+    date: "2026-05-18",
+    notes: [
+      "GPS パース: DMS（gps_lat_deg）優先に変更、decimal は DMS 不在時のフォールバックに格下げ（drogger と統一）",
+      "同一 LM ログで drogger と aracer-lab の GPS 座標値が一致するようになり、ラップ検出の精度が揃う",
+    ],
+  },
+  {
     version: "0.5.4",
     date: "2026-05-18",
     notes: [
